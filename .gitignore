@@ -1,0 +1,10 @@
+.env
+.env.local
+.env.*.local
+/app/vendor/
+/app/var/
+.idea/
+.vscode/
+.claude/
+*.log
+.DS_Store
