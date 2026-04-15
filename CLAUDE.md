@@ -49,6 +49,7 @@ Telegram-бот с интеграцией Claude API для управления
 - Короткий синтаксис массивов `[]`.
 - Открывающий тег — только `<?php`, закрывающий `?>` в чисто-PHP-файлах не ставить.
 - LF line endings, 4 пробела, одна пустая строка в конце файла.
+- **Время — всё в UTC.** В БД все datetime-поля — `TIMESTAMPTZ`, в коде создавать `\DateTimeImmutable` всегда с явной зоной UTC: `new \DateTimeImmutable('now', new \DateTimeZone('UTC'))`. Никаких `new \DateTimeImmutable()` без зоны — он подтянет `date.timezone` из php.ini (Europe/Tallinn) и сломает абсолютные моменты. Пользовательский ввод парсить в зоне юзера и `setTimezone('UTC')` перед сохранением. Конвертация в локальную зону — только на выводе (CLI/бот). Подробности — `docs/architecture/data-model.md`, секция «Работа со временем».
 
 ## Symfony
 
@@ -95,6 +96,7 @@ php bin/console app:user:list
 php bin/console app:task:create --user-id=<uuid|tg-id> --title=... --priority=high --contexts=at_home,quick
 php bin/console app:task:list --user-id=<uuid|tg-id> [--status=pending] [--limit=20]
 php bin/console app:task:done <task-uuid>
+php bin/console app:task:snooze <task-uuid> "+2 hours"   # или tomorrow 09:00, или 2026-04-20 18:00
 
 composer require <vendor/package>
 composer update
@@ -118,7 +120,7 @@ docker compose exec --user 1000:1000 php composer <cmd>
 ### Сущности
 
 - **`App\Entity\User`** — пользователь. PK: UUID v7. Поля: `telegramId` (bigint, unique, nullable — привяжется когда подключим бота), `name`, `timezone` (default `Europe/Tallinn`), `createdAt`. Связь `OneToMany` → `Task`.
-- **`App\Entity\Task`** — задача. PK: UUID v7. FK на `User` с `ON DELETE CASCADE`. Поля: `title`, `description`, `deadline`, `estimatedMinutes`, `priority`, `status`, `source`, `sourceRef`, `reminderIntervalMinutes`, `lastRemindedAt`, `completedAt`, `createdAt`/`updatedAt` (через `TimestampableTrait`). Связь `ManyToMany` → `TaskContext` через `task_context_link`.
+- **`App\Entity\Task`** — задача. PK: UUID v7. FK на `User` с `ON DELETE CASCADE`. Поля: `title`, `description`, `deadline`, `estimatedMinutes`, `priority`, `status`, `source`, `sourceRef`, `reminderIntervalMinutes`, `lastRemindedAt`, `completedAt`, `snoozedUntil`, `createdAt`/`updatedAt` (через `TimestampableTrait`). Все datetime-поля — TIMESTAMPTZ, хранятся в UTC. Связь `ManyToMany` → `TaskContext` через `task_context_link`. Методы: `markDone()`, `snooze(\DateTimeImmutable $until)`.
 - **`App\Entity\TaskContext`** — тег/контекст задачи (`at_home`, `quick`, `needs_internet` и т.д.). Используется для матчинга «задача vs ситуация пользователя» в логике рекомендаций.
 
 ### Enum'ы (`App\Enum\`)

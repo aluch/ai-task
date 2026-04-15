@@ -72,6 +72,11 @@ class TaskListCommand extends Command
             return Command::SUCCESS;
         }
 
+        $userTz = new \DateTimeZone($user->getTimezone());
+        $fmt = static fn (?\DateTimeImmutable $dt): string => $dt === null
+            ? '-'
+            : $dt->setTimezone($userTz)->format('Y-m-d H:i');
+
         $rows = [];
         foreach ($tasks as $task) {
             $contextCodes = array_map(fn ($c) => $c->getCode(), $task->getContexts()->toArray());
@@ -80,14 +85,16 @@ class TaskListCommand extends Command
                 $task->getTitle(),
                 $task->getStatus()->value,
                 $task->getPriority()->value,
-                $task->getDeadline()?->format('Y-m-d H:i') ?? '-',
+                $fmt($task->getDeadline()),
+                $fmt($task->getSnoozedUntil()),
                 implode(',', $contextCodes) ?: '-',
-                $task->getCompletedAt()?->format('Y-m-d H:i') ?? '-',
+                $fmt($task->getCompletedAt()),
             ];
         }
 
+        $io->writeln(sprintf('<info>Times shown in user timezone: %s (local)</info>', $user->getTimezone()));
         $io->table(
-            ['ID', 'Title', 'Status', 'Pri', 'Deadline', 'Contexts', 'Done at'],
+            ['ID', 'Title', 'Status', 'Pri', 'Deadline', 'Snoozed→', 'Contexts', 'Done at'],
             $rows,
         );
 

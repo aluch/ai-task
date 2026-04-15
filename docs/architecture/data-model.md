@@ -14,7 +14,7 @@ erDiagram
         bigint telegram_id UK "nullable"
         varchar name "nullable, 120"
         varchar timezone "default Europe/Tallinn"
-        timestamp created_at
+        timestamptz created_at
     }
 
     TASK {
@@ -22,17 +22,18 @@ erDiagram
         uuid user_id FK "ON DELETE CASCADE"
         varchar title "255"
         text description "nullable"
-        timestamp deadline "nullable"
+        timestamptz deadline "nullable"
         int estimated_minutes "nullable"
         varchar priority "enum, default medium"
         varchar status "enum, default pending"
         varchar source "enum, default manual"
         varchar source_ref "nullable, 255"
         int reminder_interval_minutes "nullable"
-        timestamp last_reminded_at "nullable"
-        timestamp completed_at "nullable"
-        timestamp created_at
-        timestamp updated_at
+        timestamptz last_reminded_at "nullable"
+        timestamptz completed_at "nullable"
+        timestamptz snoozed_until "nullable"
+        timestamptz created_at
+        timestamptz updated_at
     }
 
     TASK_CONTEXT {
@@ -71,6 +72,7 @@ erDiagram
 - **`reminderIntervalMinutes`** — как часто напоминать пользователю. `null` = не напоминать.
 - **`lastRemindedAt`** — когда последний раз напомнили. Используется планировщиком: «отправить, если `now - lastRemindedAt >= reminderIntervalMinutes`».
 - **`completedAt`** — заполняется методом `markDone()` одновременно с переводом в `DONE`.
+- **`snoozedUntil`** — момент, до которого задача «спит». Заполняется методом `snooze(\DateTimeImmutable $until)` одновременно с переводом в `SNOOZED`. Пока `now() < snoozedUntil`, задача скрыта из обычной выборки `findForUser()` (без явного `--status`); с явным `--status=snoozed` показывается всегда. После наступления момента — снова попадает в обычный список.
 - **`createdAt`/`updatedAt`** — `TimestampableTrait`, лайфсайкл-коллбеки `#[PrePersist]`/`#[PreUpdate]`.
 - **`contexts`** — `ManyToMany → TaskContext`, join-таблица `task_context_link`. Без inverse-стороны: контексты — это словарь, а не aggregate root.
 
@@ -142,8 +144,35 @@ private TaskPriority $priority = TaskPriority::MEDIUM;
 - Длинные строки в логах и URL → решается коротким префиксом (`substr(uuid, 0, 8)`) для UI.
 - Чуть тяжелее `BIGSERIAL` по размеру PK → для нашего масштаба пренебрежимо.
 
+## Работа со временем
+
+**Все datetime-поля в БД — `TIMESTAMP WITH TIME ZONE` (TIMESTAMPTZ)**, маппинг через Doctrine-тип `datetimetz_immutable`. Postgres хранит TIMESTAMPTZ внутренне в UTC и сериализует наружу с явным офсетом, что даёт однозначную семантику абсолютного момента.
+
+Правила работы со временем в коде:
+
+1. **В БД и в полях сущностей — всегда UTC.** Любой `\DateTimeImmutable`, который попадает в setter, должен быть в UTC. Создавать в коде так:
+   ```php
+   new \DateTimeImmutable('now', new \DateTimeZone('UTC'))
+   ```
+   Никаких `new \DateTimeImmutable()` без зоны — он подцепит `date.timezone` из `php.ini` (у нас Europe/Tallinn) и всё «поплывёт».
+
+2. **Парсинг пользовательского ввода** (CLI / Telegram) — в зоне пользователя, потом `setTimezone('UTC')` перед сохранением. Пример из `TaskCreateCommand::parseDeadline()`:
+   ```php
+   \DateTimeImmutable::createFromFormat('Y-m-d H:i', $raw, new \DateTimeZone($user->getTimezone()))
+   ```
+   Doctrine сам сконвертирует в UTC при `flush()`, но для явности лучше отдавать ему уже UTC-объект.
+
+3. **Вывод пользователю** (CLI / бот) — конвертация в зону пользователя через `->setTimezone($userTz)` непосредственно перед `format()`. Пример из `TaskListCommand` — заголовок таблицы помечен `Times shown in user timezone: <tz> (local)`.
+
+4. **Относительные сдвиги типа `+2h` / `+1d`** — короткие формы PHP парсит как фиксированный TZ-офсет (`+2h` = `+02:00`!), а не как сдвиг времени. Поэтому `TaskSnoozeCommand` явно расширяет короткие формы (`+2h` → `+2 hours`) перед `modify()`. Если пишешь свою команду с relative time — либо принимай только полные формы, либо гоняй через ту же логику.
+
+## Принятые решения
+
+- **TIMESTAMPTZ для всех datetime.** Изначально планировал отложить (см. историю в `docs/architecture/data-model.md` до миграции `Version20260415191946`), но передумал — приложение с самого старта мультипользовательское, у `User` уже есть поле `timezone`, и хранить «голые» TIMESTAMP в этих условиях значит закладывать мину. Перевод выполнен миграцией `Version20260415191946` с явным `USING ... AT TIME ZONE 'Europe/Tallinn'`, чтобы переинтерпретировать существующие naive значения, которые PHP писал в локальной зоне (см. `php-cli.ini`/`php-fpm.ini`). Без явного `USING` Postgres взял бы зону сессии БД — это лотерея.
+- **PHP enum через нативный Doctrine ORM 3 `enumType:`**, в БД `VARCHAR(16)` с дефолтом. Сознательно не PG `ENUM`: его сложно мигрировать (`ALTER TYPE ... ADD VALUE` не откатывается одной транзакцией), и Doctrine не дружит с ним без кастомных типов.
+- **UUID v7 для всех PK**, нативный postgres `UUID`. Подробнее в секции «Почему UUID v7» выше.
+
 ## Решения, которые отложены
 
-- **`TIMESTAMP WITHOUT TIME ZONE`** vs `TIMESTAMPTZ`. Сейчас все datetime-поля — `TIMESTAMP(0) WITHOUT TIME ZONE` (так Doctrine мапит `datetime_immutable` по умолчанию). Для приложения с пользовательскими таймзонами правильнее `TIMESTAMPTZ`. Отложено: переход требует кастомного Doctrine-типа или явного маппинга, делать это до того как есть реальные пользователи и багов с зонами — преждевременная оптимизация. Когда будет первый баг с дедлайном «не в той зоне», заведём `datetimetz_immutable`.
 - **Soft delete для задач.** Сейчас удаления нет вообще, только статус `CANCELLED`. Если выяснится что нужен «удалить вообще не глядя» — добавим `deletedAt` + filter.
 - **Историю изменений статусов** (audit log) — пока не нужна, при необходимости заведём отдельную таблицу `task_status_log`.

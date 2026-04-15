@@ -11,6 +11,7 @@ use App\Enum\TaskStatus;
 use App\Repository\TaskRepository;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
@@ -38,7 +39,7 @@ class Task
     #[ORM\Column(type: 'text', nullable: true)]
     private ?string $description = null;
 
-    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $deadline = null;
 
     #[ORM\Column(type: 'integer', nullable: true)]
@@ -59,11 +60,14 @@ class Task
     #[ORM\Column(type: 'integer', nullable: true)]
     private ?int $reminderIntervalMinutes = null;
 
-    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $lastRemindedAt = null;
 
-    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $completedAt = null;
+
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $snoozedUntil = null;
 
     /** @var Collection<int, TaskContext> */
     #[ORM\ManyToMany(targetEntity: TaskContext::class)]
@@ -225,7 +229,20 @@ class Task
     public function markDone(): self
     {
         $this->status = TaskStatus::DONE;
-        $this->completedAt = new \DateTimeImmutable();
+        $this->completedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        return $this;
+    }
+
+    public function getSnoozedUntil(): ?\DateTimeImmutable
+    {
+        return $this->snoozedUntil;
+    }
+
+    public function snooze(\DateTimeImmutable $until): self
+    {
+        $this->status = TaskStatus::SNOOZED;
+        $this->snoozedUntil = $until;
 
         return $this;
     }

@@ -34,6 +34,11 @@ class TaskRepository extends ServiceEntityRepository
         if ($status !== null) {
             $qb->andWhere('t.status = :status')
                 ->setParameter('status', $status);
+        } else {
+            // Без явного фильтра скрываем активно-отложенные задачи.
+            $qb->andWhere('t.status != :snoozed OR t.snoozedUntil IS NULL OR t.snoozedUntil <= :now')
+                ->setParameter('snoozed', TaskStatus::SNOOZED)
+                ->setParameter('now', new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
         }
 
         return $qb->getQuery()->getResult();

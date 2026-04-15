@@ -69,7 +69,7 @@ class TaskCreateCommand extends Command
         }
 
         if (($deadlineRaw = $input->getOption('deadline')) !== null) {
-            $deadline = $this->parseDeadline((string) $deadlineRaw);
+            $deadline = $this->parseDeadline((string) $deadlineRaw, new \DateTimeZone($user->getTimezone()));
             if ($deadline === null) {
                 $io->error('Invalid --deadline. Use Y-m-d H:i or Y-m-d.');
 
@@ -118,11 +118,15 @@ class TaskCreateCommand extends Command
         return Command::SUCCESS;
     }
 
-    private function parseDeadline(string $raw): ?\DateTimeImmutable
+    private function parseDeadline(string $raw, \DateTimeZone $userTz): ?\DateTimeImmutable
     {
         foreach (['Y-m-d H:i', 'Y-m-d'] as $format) {
-            $dt = \DateTimeImmutable::createFromFormat($format, $raw);
+            $dt = \DateTimeImmutable::createFromFormat($format, $raw, $userTz);
             if ($dt instanceof \DateTimeImmutable) {
+                if ($format === 'Y-m-d') {
+                    $dt = $dt->setTime(0, 0, 0);
+                }
+
                 return $dt;
             }
         }
