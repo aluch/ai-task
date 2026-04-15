@@ -5,7 +5,7 @@ Telegram-бот с интеграцией Claude API для управления
 ## Стек
 
 - PHP 8.3 (FPM, Alpine)
-- Symfony 7 (устанавливается в `app/` отдельным шагом)
+- Symfony 7.4
 - PostgreSQL 16
 - Redis 7
 - Nginx 1.27
@@ -50,9 +50,61 @@ Telegram-бот с интеграцией Claude API для управления
 - Открывающий тег — только `<?php`, закрывающий `?>` в чисто-PHP-файлах не ставить.
 - LF line endings, 4 пробела, одна пустая строка в конце файла.
 
+## Symfony
+
+Установлено: Symfony **7.4** (skeleton) в `app/`.
+
+Бандлы и пакеты:
+
+- `symfony/framework-bundle` — ядро
+- `symfony/orm-pack` (doctrine-bundle, doctrine-migrations-bundle, ORM)
+- `symfony/maker-bundle` (dev) — генераторы
+- `symfony/console`
+- `symfony/messenger` — асинхронные сообщения (DSN по умолчанию `doctrine://default`)
+- `symfony/scheduler` — планировщик
+- `symfony/http-client` — HTTP-клиент (для Claude API, Telegram API)
+- `symfony/uid` — UUID для сущностей
+- `symfony/monolog-bundle` — логирование
+- `symfony/validator` — валидация
+- `nyholm/psr7` — PSR-7 (понадобится для Telegram webhook)
+
+### Локальные переопределения
+
+Файл `app/.env.local` (в .gitignore, не коммитится) задаёт `DATABASE_URL` и прочие переменные под локальное Docker-окружение. Корневой `.env` — для docker-compose, `app/.env.local` — для самого Symfony внутри php-контейнера. Хост БД внутри сети контейнеров — `postgres`, не `localhost`.
+
+### Часто используемые команды
+
+Все команды Symfony/Composer выполняются **внутри php-контейнера**.
+
+```bash
+make bash                                 # войти в контейнер (sh)
+# затем:
+php bin/console list
+php bin/console app:hello                 # smoke-test
+php bin/console doctrine:database:create --if-not-exists
+php bin/console doctrine:migrations:diff
+php bin/console doctrine:migrations:migrate
+php bin/console make:entity
+php bin/console make:command
+php bin/console messenger:consume async -vv
+composer require <vendor/package>
+composer update
+```
+
+Альтернатива без интерактива (важно: `--user 1000:1000` чтобы файлы не уходили под root):
+
+```bash
+docker compose exec --user 1000:1000 php php bin/console <cmd>
+docker compose exec --user 1000:1000 php composer <cmd>
+```
+
+### Smoke-test
+
+`App\Command\HelloCommand` (`app:hello`) — простая команда, которая печатает «AI Task Agent is alive» и текущее время. Используется для проверки что Symfony правильно загружается, БД доступна, контейнер живой.
+
 ## Следующие шаги
 
-1. Установить Symfony 7 skeleton в `app/` (`composer create-project symfony/skeleton app`).
-2. Добавить webapp-пакет при необходимости.
-3. Подключить `symfony/messenger` для очередей (worker-контейнер на том же php-образе).
-4. Добавить Telegram-бот сервис (на том же php-образе, отдельной command).
+1. Описать сущности задач (`Task`, `User`) через `make:entity`, сгенерировать миграцию.
+2. Подключить интеграцию с Telegram (webhook + long-polling вариант).
+3. Подключить Claude API через `symfony/http-client` + сервис-обёртку.
+4. Добавить worker-контейнер `messenger:consume` на том же php-образе.

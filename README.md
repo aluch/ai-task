@@ -15,12 +15,13 @@ make ps
 - App (после установки Symfony): http://localhost:8080
 - Adminer: http://localhost:8081 (Server: `postgres`, User/Pass/DB — из `.env`)
 
-Вход в php-контейнер:
+Вход в php-контейнер и проверка что Symfony работает:
 
 ```bash
 make bash
 php -v
 composer -V
+php bin/console app:hello   # должно вывести "AI Task Agent is alive — <timestamp>"
 ```
 
 Остановка и полная очистка:
@@ -32,4 +33,4 @@ make clean   # + удалит volumes
 
 ## Дальше
 
-В `app/` устанавливается Symfony 7 skeleton — см. `CLAUDE.md`.
+Symfony 7.4 уже установлен в `app/`. Подробности про стек, бандлы и команды — в `CLAUDE.md`.
