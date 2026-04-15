@@ -1,0 +1,254 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Entity;
+
+use App\Entity\Trait\TimestampableTrait;
+use App\Enum\TaskPriority;
+use App\Enum\TaskSource;
+use App\Enum\TaskStatus;
+use App\Repository\TaskRepository;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
+use Doctrine\ORM\Mapping as ORM;
+use Symfony\Bridge\Doctrine\Types\UuidType;
+use Symfony\Component\Uid\Uuid;
+
+#[ORM\Entity(repositoryClass: TaskRepository::class)]
+#[ORM\Table(name: 'tasks')]
+#[ORM\Index(columns: ['user_id', 'status'], name: 'idx_tasks_user_status')]
+#[ORM\Index(columns: ['deadline'], name: 'idx_tasks_deadline')]
+#[ORM\HasLifecycleCallbacks]
+class Task
+{
+    use TimestampableTrait;
+
+    #[ORM\Id]
+    #[ORM\Column(type: UuidType::NAME, unique: true)]
+    private Uuid $id;
+
+    #[ORM\ManyToOne(targetEntity: User::class, inversedBy: 'tasks')]
+    #[ORM\JoinColumn(name: 'user_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    private User $user;
+
+    #[ORM\Column(length: 255)]
+    private string $title;
+
+    #[ORM\Column(type: 'text', nullable: true)]
+    private ?string $description = null;
+
+    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    private ?\DateTimeImmutable $deadline = null;
+
+    #[ORM\Column(type: 'integer', nullable: true)]
+    private ?int $estimatedMinutes = null;
+
+    #[ORM\Column(type: 'string', length: 16, enumType: TaskPriority::class, options: ['default' => 'medium'])]
+    private TaskPriority $priority = TaskPriority::MEDIUM;
+
+    #[ORM\Column(type: 'string', length: 16, enumType: TaskStatus::class, options: ['default' => 'pending'])]
+    private TaskStatus $status = TaskStatus::PENDING;
+
+    #[ORM\Column(type: 'string', length: 16, enumType: TaskSource::class, options: ['default' => 'manual'])]
+    private TaskSource $source = TaskSource::MANUAL;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $sourceRef = null;
+
+    #[ORM\Column(type: 'integer', nullable: true)]
+    private ?int $reminderIntervalMinutes = null;
+
+    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    private ?\DateTimeImmutable $lastRemindedAt = null;
+
+    #[ORM\Column(type: 'datetime_immutable', nullable: true)]
+    private ?\DateTimeImmutable $completedAt = null;
+
+    /** @var Collection<int, TaskContext> */
+    #[ORM\ManyToMany(targetEntity: TaskContext::class)]
+    #[ORM\JoinTable(name: 'task_context_link')]
+    #[ORM\JoinColumn(name: 'task_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
+    #[ORM\InverseJoinColumn(name: 'context_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
+    private Collection $contexts;
+
+    public function __construct(User $user, string $title)
+    {
+        $this->id = Uuid::v7();
+        $this->user = $user;
+        $this->title = $title;
+        $this->contexts = new ArrayCollection();
+    }
+
+    public function getId(): Uuid
+    {
+        return $this->id;
+    }
+
+    public function getUser(): User
+    {
+        return $this->user;
+    }
+
+    public function setUser(User $user): self
+    {
+        $this->user = $user;
+
+        return $this;
+    }
+
+    public function getTitle(): string
+    {
+        return $this->title;
+    }
+
+    public function setTitle(string $title): self
+    {
+        $this->title = $title;
+
+        return $this;
+    }
+
+    public function getDescription(): ?string
+    {
+        return $this->description;
+    }
+
+    public function setDescription(?string $description): self
+    {
+        $this->description = $description;
+
+        return $this;
+    }
+
+    public function getDeadline(): ?\DateTimeImmutable
+    {
+        return $this->deadline;
+    }
+
+    public function setDeadline(?\DateTimeImmutable $deadline): self
+    {
+        $this->deadline = $deadline;
+
+        return $this;
+    }
+
+    public function getEstimatedMinutes(): ?int
+    {
+        return $this->estimatedMinutes;
+    }
+
+    public function setEstimatedMinutes(?int $estimatedMinutes): self
+    {
+        $this->estimatedMinutes = $estimatedMinutes;
+
+        return $this;
+    }
+
+    public function getPriority(): TaskPriority
+    {
+        return $this->priority;
+    }
+
+    public function setPriority(TaskPriority $priority): self
+    {
+        $this->priority = $priority;
+
+        return $this;
+    }
+
+    public function getStatus(): TaskStatus
+    {
+        return $this->status;
+    }
+
+    public function setStatus(TaskStatus $status): self
+    {
+        $this->status = $status;
+
+        return $this;
+    }
+
+    public function getSource(): TaskSource
+    {
+        return $this->source;
+    }
+
+    public function setSource(TaskSource $source): self
+    {
+        $this->source = $source;
+
+        return $this;
+    }
+
+    public function getSourceRef(): ?string
+    {
+        return $this->sourceRef;
+    }
+
+    public function setSourceRef(?string $sourceRef): self
+    {
+        $this->sourceRef = $sourceRef;
+
+        return $this;
+    }
+
+    public function getReminderIntervalMinutes(): ?int
+    {
+        return $this->reminderIntervalMinutes;
+    }
+
+    public function setReminderIntervalMinutes(?int $reminderIntervalMinutes): self
+    {
+        $this->reminderIntervalMinutes = $reminderIntervalMinutes;
+
+        return $this;
+    }
+
+    public function getLastRemindedAt(): ?\DateTimeImmutable
+    {
+        return $this->lastRemindedAt;
+    }
+
+    public function setLastRemindedAt(?\DateTimeImmutable $lastRemindedAt): self
+    {
+        $this->lastRemindedAt = $lastRemindedAt;
+
+        return $this;
+    }
+
+    public function getCompletedAt(): ?\DateTimeImmutable
+    {
+        return $this->completedAt;
+    }
+
+    public function markDone(): self
+    {
+        $this->status = TaskStatus::DONE;
+        $this->completedAt = new \DateTimeImmutable();
+
+        return $this;
+    }
+
+    /** @return Collection<int, TaskContext> */
+    public function getContexts(): Collection
+    {
+        return $this->contexts;
+    }
+
+    public function addContext(TaskContext $context): self
+    {
+        if (!$this->contexts->contains($context)) {
+            $this->contexts->add($context);
+        }
+
+        return $this;
+    }
+
+    public function removeContext(TaskContext $context): self
+    {
+        $this->contexts->removeElement($context);
+
+        return $this;
+    }
+}
