@@ -1,21 +1,32 @@
+x-php-service: &php-service
+  build:
+    context: ./docker/php
+    dockerfile: Dockerfile
+  working_dir: /var/www/app
+  volumes:
+    - ./app:/var/www/app:cached
+  env_file:
+    - .env
+  environment:
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ANTHROPIC_MODEL_PARSER: ${ANTHROPIC_MODEL_PARSER}
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+    TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS}
+    DATABASE_URL: ${DATABASE_URL}
+    APP_ENV: ${APP_ENV}
+    APP_SECRET: ${APP_SECRET}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  networks:
+    - ai-task
+
 services:
   php:
-    build:
-      context: ./docker/php
-      dockerfile: Dockerfile
+    <<: *php-service
     container_name: ai-task-php
-    working_dir: /var/www/app
-    volumes:
-      - ./app:/var/www/app:cached
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    networks:
-      - ai-task
 
   nginx:
     image: nginx:1.27-alpine
@@ -60,25 +71,11 @@ services:
       - ai-task
 
   bot:
-    build:
-      context: ./docker/php
-      dockerfile: Dockerfile
+    <<: *php-service
     container_name: ai-task-bot
-    working_dir: /var/www/app
     command: php bin/console app:bot:run -vv
-    volumes:
-      - ./app:/var/www/app:cached
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
     restart: on-failure
     stop_grace_period: 35s
-    networks:
-      - ai-task
 
   adminer:
     image: adminer:latest
