@@ -100,6 +100,8 @@ php bin/console app:task:create --user-id=<uuid|tg-id> --title=... --priority=hi
 php bin/console app:task:list --user-id=<uuid|tg-id> [--status=pending] [--limit=20]
 php bin/console app:task:done <task-uuid>
 php bin/console app:task:snooze <task-uuid> "+2 hours"   # или tomorrow 09:00, или 2026-04-20 18:00
+php bin/console app:task:block <blocked-uuid> <blocker-uuid>
+php bin/console app:task:deps <task-uuid>
 
 composer require <vendor/package>
 composer update
@@ -123,7 +125,7 @@ docker compose exec --user 1000:1000 php composer <cmd>
 ### Сущности
 
 - **`App\Entity\User`** — пользователь. PK: UUID v7. Поля: `telegramId` (bigint, unique, nullable — привяжется когда подключим бота), `name`, `timezone` (default `Europe/Tallinn`), `createdAt`. Связь `OneToMany` → `Task`.
-- **`App\Entity\Task`** — задача. PK: UUID v7. FK на `User` с `ON DELETE CASCADE`. Поля: `title`, `description`, `deadline`, `estimatedMinutes`, `priority`, `status`, `source`, `sourceRef`, `reminderIntervalMinutes`, `lastRemindedAt`, `completedAt`, `snoozedUntil`, `createdAt`/`updatedAt` (через `TimestampableTrait`). Все datetime-поля — TIMESTAMPTZ, хранятся в UTC. Связь `ManyToMany` → `TaskContext` через `task_context_link`. Методы: `markDone()`, `snooze(\DateTimeImmutable $until)`.
+- **`App\Entity\Task`** — задача. PK: UUID v7. FK на `User` с `ON DELETE CASCADE`. Поля: `title`, `description`, `deadline`, `estimatedMinutes`, `priority`, `status`, `source`, `sourceRef`, `reminderIntervalMinutes`, `lastRemindedAt`, `completedAt`, `snoozedUntil`, `createdAt`/`updatedAt` (через `TimestampableTrait`). Все datetime-поля — TIMESTAMPTZ, хранятся в UTC. Связь `ManyToMany` → `TaskContext` через `task_context_link`. Методы: `markDone()`, `snooze(\DateTimeImmutable $until)`, `addBlocker(Task)`, `isBlocked()`, `getActiveBlockers()`. Связь `ManyToMany(self)` через `task_dependencies` для зависимостей.
 - **`App\Entity\TaskContext`** — тег/контекст задачи (`at_home`, `quick`, `needs_internet` и т.д.). Используется для матчинга «задача vs ситуация пользователя» в логике рекомендаций.
 
 ### Enum'ы (`App\Enum\`)
@@ -163,8 +165,11 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `/start` — регистрация и приветствие
 - `/help` — справка по командам
 - `/list` — открытые задачи (до 10) с дедлайнами в зоне юзера
-- `/done <id>` — пометить задачу выполненной (первые 8+ символов UUID)
+- `/done <id>` — пометить задачу выполненной (первые 8+ символов UUID). Уведомляет о разблокированных задачах.
 - `/snooze <id> <когда>` — отложить задачу
+- `/block <task> <blocker>` — задача task заблокирована blocker'ом (проверка циклов)
+- `/unblock <task> <blocker>` — убрать зависимость
+- `/deps <id>` — показать зависимости задачи
 - (свободный текст) — AI-парсинг задачи через Claude (title, deadline, priority, contexts)
 
 ### Сервис в docker-compose

@@ -76,12 +76,25 @@ class Task
     #[ORM\InverseJoinColumn(name: 'context_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
     private Collection $contexts;
 
+    /** @var Collection<int, Task> Задачи, которые блокируют текущую */
+    #[ORM\ManyToMany(targetEntity: Task::class, inversedBy: 'blocking')]
+    #[ORM\JoinTable(name: 'task_dependencies')]
+    #[ORM\JoinColumn(name: 'blocked_task_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
+    #[ORM\InverseJoinColumn(name: 'blocker_task_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
+    private Collection $blockedBy;
+
+    /** @var Collection<int, Task> Задачи, которые блокирует текущая */
+    #[ORM\ManyToMany(targetEntity: Task::class, mappedBy: 'blockedBy')]
+    private Collection $blocking;
+
     public function __construct(User $user, string $title)
     {
         $this->id = Uuid::v7();
         $this->user = $user;
         $this->title = $title;
         $this->contexts = new ArrayCollection();
+        $this->blockedBy = new ArrayCollection();
+        $this->blocking = new ArrayCollection();
     }
 
     public function getId(): Uuid
@@ -267,5 +280,52 @@ class Task
         $this->contexts->removeElement($context);
 
         return $this;
+    }
+
+    /** @return Collection<int, Task> */
+    public function getBlockedBy(): Collection
+    {
+        return $this->blockedBy;
+    }
+
+    public function addBlocker(Task $blocker): void
+    {
+        if ($blocker->getId()->equals($this->id)) {
+            throw new \LogicException('Задача не может блокировать саму себя.');
+        }
+
+        if (!$this->blockedBy->contains($blocker)) {
+            $this->blockedBy->add($blocker);
+        }
+    }
+
+    public function removeBlocker(Task $blocker): void
+    {
+        $this->blockedBy->removeElement($blocker);
+    }
+
+    public function isBlocked(): bool
+    {
+        return $this->getActiveBlockers() !== [];
+    }
+
+    /**
+     * @return Task[]
+     */
+    public function getActiveBlockers(): array
+    {
+        return $this->blockedBy->filter(
+            fn (Task $t) => $t->getStatus() !== TaskStatus::DONE && $t->getStatus() !== TaskStatus::CANCELLED,
+        )->toArray();
+    }
+
+    /**
+     * Задачи, которые блокирует текущая (обратная сторона).
+     *
+     * @return Collection<int, Task>
+     */
+    public function getBlockedTasks(): Collection
+    {
+        return $this->blocking;
     }
 }

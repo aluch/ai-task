@@ -43,4 +43,17 @@ class TaskRepository extends ServiceEntityRepository
 
         return $qb->getQuery()->getResult();
     }
+
+    /**
+     * Задачи без активных блокеров (или без блокеров вообще).
+     * TODO: для масштабирования заменить PHP-фильтрацию на SQL subquery.
+     *
+     * @return Task[]
+     */
+    public function findUnblockedForUser(User $user, ?TaskStatus $status = null): array
+    {
+        $all = $this->findForUser($user, $status);
+
+        return array_values(array_filter($all, fn (Task $t) => !$t->isBlocked()));
+    }
 }

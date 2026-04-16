@@ -52,12 +52,38 @@ class DoneHandler
         }
 
         $task = $matches[0];
+
+        // Запомним задачи, которые были заблокированы до выполнения
+        $wasBlockingBefore = [];
+        foreach ($task->getBlockedTasks() as $downstream) {
+            if ($downstream->isBlocked()) {
+                $wasBlockingBefore[$downstream->getId()->toRfc4122()] = $downstream;
+            }
+        }
+
         $task->markDone();
         $this->em->flush();
 
-        $bot->sendMessage(
-            text: "✅ Задача выполнена: {$task->getTitle()}",
-        );
+        $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
+
+        // Проверяем какие задачи разблокировались
+        $unblocked = [];
+        foreach ($wasBlockingBefore as $id => $downstream) {
+            if (!$downstream->isBlocked()) {
+                $unblocked[] = $downstream;
+            }
+        }
+
+        if ($unblocked !== []) {
+            $lines[] = '';
+            $lines[] = '🔓 Разблокирована:';
+            foreach ($unblocked as $t) {
+                $sid = substr($t->getId()->toRfc4122(), 0, 8);
+                $lines[] = "  • {$t->getTitle()} — {$sid}";
+            }
+        }
+
+        $bot->sendMessage(text: implode("\n", $lines));
     }
 
     /**

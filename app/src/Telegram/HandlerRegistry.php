@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace App\Telegram;
 
+use App\Telegram\Handler\BlockHandler;
+use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
 use App\Telegram\Handler\FreeTextHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
 use App\Telegram\Handler\SnoozeHandler;
 use App\Telegram\Handler\StartHandler;
+use App\Telegram\Handler\UnblockHandler;
 use App\Telegram\Middleware\WhitelistMiddleware;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
@@ -23,6 +26,9 @@ class HandlerRegistry
         private readonly ListHandler $listHandler,
         private readonly DoneHandler $doneHandler,
         private readonly SnoozeHandler $snoozeHandler,
+        private readonly BlockHandler $blockHandler,
+        private readonly UnblockHandler $unblockHandler,
+        private readonly DepsHandler $depsHandler,
         private readonly FreeTextHandler $freeTextHandler,
         private readonly LoggerInterface $logger,
     ) {
@@ -37,6 +43,9 @@ class HandlerRegistry
         $bot->onCommand('list', $this->listHandler);
         $bot->onCommand('done', $this->doneHandler);
         $bot->onCommand('snooze', $this->snoozeHandler);
+        $bot->onCommand('block', $this->blockHandler);
+        $bot->onCommand('unblock', $this->unblockHandler);
+        $bot->onCommand('deps', $this->depsHandler);
 
         $freeTextHandler = $this->freeTextHandler;
         $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {
@@ -68,7 +77,6 @@ class HandlerRegistry
             try {
                 $bot->sendMessage(text: 'Что-то пошло не так, попробуй ещё раз. Если повторится — посмотри логи.');
             } catch (\Throwable) {
-                // Если не удалось отправить — ничего страшного
             }
         });
     }

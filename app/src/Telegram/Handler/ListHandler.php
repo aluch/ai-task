@@ -34,7 +34,6 @@ class ListHandler
 
         $tasks = $this->tasks->findForUser($user, limit: self::LIMIT + 1);
 
-        // Подсчёт всех для подсказки "показаны X из Y"
         $hasMore = count($tasks) > self::LIMIT;
         $tasks = array_slice($tasks, 0, self::LIMIT);
 
@@ -44,8 +43,21 @@ class ListHandler
             return;
         }
 
+        // Разделяем: незаблокированные вверху, заблокированные внизу
+        $unblocked = [];
+        $blocked = [];
+        foreach ($tasks as $task) {
+            if ($task->isBlocked()) {
+                $blocked[] = $task;
+            } else {
+                $unblocked[] = $task;
+            }
+        }
+
+        $sorted = array_merge($unblocked, $blocked);
+
         $lines = [];
-        foreach ($tasks as $i => $task) {
+        foreach ($sorted as $i => $task) {
             $lines[] = $this->formatTask($i + 1, $task, $userTz);
         }
 
@@ -73,9 +85,10 @@ class ListHandler
             $statusStr = ' 💤 до ' . $task->getSnoozedUntil()->setTimezone($userTz)->format('d.m H:i');
         }
 
+        $blockedStr = $task->isBlocked() ? ' ⛔' : '';
         $priStr = $priEmoji !== '' ? " {$priEmoji}" : '';
 
-        return "{$num}. {$title}{$deadlineStr}{$priStr}{$statusStr}\n   ID: {$shortId}";
+        return "{$num}. {$title}{$deadlineStr}{$priStr}{$statusStr}{$blockedStr}\n   ID: {$shortId}";
     }
 
     private function formatDeadline(\DateTimeImmutable $deadline, \DateTimeZone $userTz): string
