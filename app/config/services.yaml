@@ -9,6 +9,8 @@
 parameters:
     telegram.bot_token: '%env(TELEGRAM_BOT_TOKEN)%'
     telegram.allowed_user_ids: '%env(TELEGRAM_ALLOWED_USER_IDS)%'
+    anthropic.api_key: '%env(ANTHROPIC_API_KEY)%'
+    anthropic.model_parser: '%env(ANTHROPIC_MODEL_PARSER)%'
 
 services:
     # default configuration for services in *this* file
@@ -29,3 +31,12 @@ services:
     App\Command\BotRunCommand:
         arguments:
             $telegramToken: '%telegram.bot_token%'
+
+    # Claude API
+    App\AI\ClaudeClient:
+        arguments:
+            $apiKey: '%anthropic.api_key%'
+
+    App\AI\TaskParser:
+        arguments:
+            $model: '%anthropic.model_parser%'

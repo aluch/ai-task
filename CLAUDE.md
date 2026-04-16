@@ -70,6 +70,7 @@ Telegram-бот с интеграцией Claude API для управления
 - `symfony/monolog-bundle` — логирование
 - `symfony/validator` — валидация
 - `nyholm/psr7` — PSR-7 (понадобится для Telegram webhook)
+- `nutgram/nutgram` — Telegram Bot API (long polling)
 
 ### Локальные переопределения
 
@@ -164,7 +165,7 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `/list` — открытые задачи (до 10) с дедлайнами в зоне юзера
 - `/done <id>` — пометить задачу выполненной (первые 8+ символов UUID)
 - `/snooze <id> <когда>` — отложить задачу
-- (свободный текст) — создать задачу из текста
+- (свободный текст) — AI-парсинг задачи через Claude (title, deadline, priority, contexts)
 
 ### Сервис в docker-compose
 
@@ -174,9 +175,33 @@ bot:
   restart: on-failure   # exit 0 (нет токена) — не перезапускает
 ```
 
+## AI
+
+Подробная архитектура — `docs/architecture/ai-integration.md`.
+
+### Компоненты
+
+- `App\AI\ClaudeClient` — обёртка вокруг Symfony HttpClient для Anthropic Messages API. Классифицирует ошибки: `ClaudeClientException` (4xx), `ClaudeTransientException` (5xx/сеть), `ClaudeRateLimitException` (429). Логирует каждый вызов: модель, tokens, elapsed.
+- `App\AI\TaskParser` — превращает свободный текст в `ParsedTaskDTO`. System prompt содержит текущее время пользователя, его timezone и список контекстов из БД. Ответ — JSON, парсится с fallback.
+- `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
+- `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
+
+### Модели
+
+| Use case | Модель | Переменная |
+|---|---|---|
+| Парсинг задач | `claude-haiku-4-5` | `ANTHROPIC_MODEL_PARSER` |
+
+Haiku выбрана для парсинга: достаточно умна для структурного извлечения, значительно дешевле и быстрее Opus/Sonnet. Переключение через `.env` без передеплоя.
+
+### Переменные окружения
+
+- `ANTHROPIC_API_KEY` — API key от Anthropic (обязателен для AI-функций)
+- `ANTHROPIC_MODEL_PARSER` — модель парсера (default `claude-haiku-4-5`)
+
 ## Следующие шаги
 
-1. Подключить Claude API через `symfony/http-client` + сервис-обёртку (создание задач из текста — `source = ai_parsed`).
-2. Добавить worker-контейнер `messenger:consume` на том же php-образе.
-3. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
+1. Добавить worker-контейнер `messenger:consume` на том же php-образе.
+2. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
+3. Реализовать `/free` — AI-подбор задач по контексту пользователя.
 4. Перейти на webhook (когда будет публичный URL/tunneling).

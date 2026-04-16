@@ -103,7 +103,7 @@ private TaskPriority $priority = TaskPriority::MEDIUM;
 
 `TaskStatus::SNOOZED` нужен отдельным от `PENDING` чтобы отличать «ещё не начата» и «отложена пользователем» — это разные UX-сценарии и разные напоминания.
 
-`TaskSource::AI_PARSED` означает, что задачу извлёк Claude из произвольного текста пользователя (например, «надо завтра позвонить врачу и купить кошке корм» → две задачи).
+`TaskSource::AI_PARSED` означает, что задачу извлёк Claude из произвольного текста пользователя. Активно используется: `FreeTextHandler` при получении сообщения отправляет текст в `TaskParser`, который через Claude API извлекает title, deadline, priority, contextCodes. Результат сохраняется с `source=AI_PARSED`, `sourceRef=telegram_message_id`. См. `docs/architecture/ai-integration.md`.
 
 ## Базовый набор контекстов
 
