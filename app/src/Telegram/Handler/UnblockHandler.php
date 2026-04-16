@@ -19,7 +19,7 @@ class UnblockHandler
     ) {
     }
 
-    public function __invoke(Nutgram $bot): void
+    public function __invoke(Nutgram $bot, ?string $args = null): void
     {
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';

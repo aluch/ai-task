@@ -41,11 +41,20 @@ class HandlerRegistry
         $bot->onCommand('start', $this->startHandler);
         $bot->onCommand('help', $this->helpHandler);
         $bot->onCommand('list', $this->listHandler);
+
+        // Команды с аргументами: регистрируем и голый вариант (показать usage),
+        // и вариант с {args} (реальная обработка). onCommand('done') матчит
+        // только точный "/done", onCommand('done {args}') — "/done что-угодно".
         $bot->onCommand('done', $this->doneHandler);
+        $bot->onCommand('done {args}', $this->doneHandler);
         $bot->onCommand('snooze', $this->snoozeHandler);
+        $bot->onCommand('snooze {args}', $this->snoozeHandler);
         $bot->onCommand('block', $this->blockHandler);
+        $bot->onCommand('block {args}', $this->blockHandler);
         $bot->onCommand('unblock', $this->unblockHandler);
+        $bot->onCommand('unblock {args}', $this->unblockHandler);
         $bot->onCommand('deps', $this->depsHandler);
+        $bot->onCommand('deps {args}', $this->depsHandler);
 
         $freeTextHandler = $this->freeTextHandler;
         $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {
