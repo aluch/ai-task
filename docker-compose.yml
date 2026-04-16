@@ -59,6 +59,26 @@ services:
     networks:
       - ai-task
 
+  bot:
+    build:
+      context: ./docker/php
+      dockerfile: Dockerfile
+    container_name: ai-task-bot
+    working_dir: /var/www/app
+    command: php bin/console app:bot:run -vv
+    volumes:
+      - ./app:/var/www/app:cached
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: on-failure
+    networks:
+      - ai-task
+
   adminer:
     image: adminer:latest
     container_name: ai-task-adminer

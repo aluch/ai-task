@@ -65,6 +65,25 @@ php bin/console app:task:list --user-id=12345 --status=done
 
 Полный список доступных кодов контекстов и описание модели — в `docs/architecture/data-model.md`.
 
+## Telegram setup
+
+1. Получи токен у [@BotFather](https://t.me/BotFather): `/newbot`, ответь на вопросы, скопируй токен.
+2. Узнай свой Telegram ID: отправь что-нибудь боту `@userinfobot` — он вернёт число.
+3. Заполни `.env`:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+   TELEGRAM_ALLOWED_USER_IDS=твой_telegram_id
+   ```
+4. Перезапусти:
+   ```bash
+   make build   # при первом разе
+   make up
+   make bot-logs   # должен увидеть "Bot started, polling..."
+   ```
+5. Напиши боту `/start` — он ответит приветствием. Отправь любой текст — создастся задача. Дальше `/list`, `/done <id>`, `/snooze <id> +2h`.
+
+Подробнее: `docs/architecture/telegram.md`.
+
 ## Дальше
 
 Symfony 7.4 уже установлен в `app/`. Подробности про стек, бандлы и команды — в `CLAUDE.md`.

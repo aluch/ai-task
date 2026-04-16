@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Command;
 
 use App\Repository\TaskRepository;
+use App\Service\RelativeTimeParser;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -23,6 +24,7 @@ class TaskSnoozeCommand extends Command
     public function __construct(
         private readonly EntityManagerInterface $em,
         private readonly TaskRepository $tasks,
+        private readonly RelativeTimeParser $timeParser,
     ) {
         parent::__construct();
     }
@@ -55,7 +57,7 @@ class TaskSnoozeCommand extends Command
         $userTz = new \DateTimeZone($task->getUser()->getTimezone());
         $rawUntil = (string) $input->getArgument('until');
 
-        $until = $this->parseUntil($rawUntil, $userTz);
+        $until = $this->timeParser->parse($rawUntil, $userTz);
         if ($until === null) {
             $io->error(sprintf('Cannot parse <until>: %s', $rawUntil));
 
@@ -81,62 +83,5 @@ class TaskSnoozeCommand extends Command
         ));
 
         return Command::SUCCESS;
-    }
-
-    private const SHORTHAND_UNITS = [
-        's' => 'seconds',
-        'm' => 'minutes',
-        'h' => 'hours',
-        'd' => 'days',
-        'w' => 'weeks',
-    ];
-
-    /**
-     * Парсит относительные сдвиги (+2h, -30m, +1d, +2 hours) через modify() от now().
-     * Абсолютные/именованные форматы (tomorrow 9am, 2026-04-20 18:00) интерпретирует
-     * в зоне пользователя. Возвращает результат всегда в UTC.
-     *
-     * Короткие формы +2h/-30m раскрываются в +2 hours/-30 minutes до передачи в
-     * modify(): иначе PHP парсит "+2h" как фиксированный офсет зоны +02:00 (синтаксис
-     * TZ-офсета затмевает короткий relative-format). По той же причине "m" здесь
-     * = minutes, не months — для месяцев пиши явно "+1 month".
-     */
-    private function parseUntil(string $raw, \DateTimeZone $userTz): ?\DateTimeImmutable
-    {
-        $utc = new \DateTimeZone('UTC');
-        $raw = trim($raw);
-
-        if ($raw === '') {
-            return null;
-        }
-
-        try {
-            if ($raw[0] === '+' || $raw[0] === '-') {
-                $expanded = $this->expandShorthand($raw);
-                $now = new \DateTimeImmutable('now', $utc);
-                $modified = $now->modify($expanded);
-                if ($modified === false || $modified->getTimestamp() === $now->getTimestamp()) {
-                    return null;
-                }
-
-                return $modified;
-            }
-
-            return (new \DateTimeImmutable($raw, $userTz))->setTimezone($utc);
-        } catch (\Exception) {
-            return null;
-        }
-    }
-
-    private function expandShorthand(string $raw): string
-    {
-        if (preg_match('/^([+-])(\d+)\s*([a-z])$/i', $raw, $m) === 1) {
-            $unit = self::SHORTHAND_UNITS[strtolower($m[3])] ?? null;
-            if ($unit !== null) {
-                return $m[1] . $m[2] . ' ' . $unit;
-            }
-        }
-
-        return $raw;
     }
 }

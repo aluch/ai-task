@@ -1,6 +1,6 @@
 DC = docker compose
 
-.PHONY: up down restart build bash logs ps clean
+.PHONY: up down restart build bash logs ps clean bot-logs bot-restart
 
 up:
 	$(DC) up -d
@@ -25,3 +25,9 @@ ps:
 
 clean:
 	$(DC) down -v --remove-orphans
+
+bot-logs:
+	$(DC) logs -f bot
+
+bot-restart:
+	$(DC) restart bot

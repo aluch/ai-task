@@ -31,6 +31,8 @@ Telegram-бот с интеграцией Claude API для управления
 - `make logs` — хвост логов
 - `make ps` — статус контейнеров
 - `make clean` — снести всё включая volumes
+- `make bot-logs` — логи бота (Telegram polling)
+- `make bot-restart` — перезапуск бота
 
 Внутри php-контейнера: `composer`, `php bin/console ...` (после установки Symfony).
 
@@ -142,9 +144,39 @@ docker compose exec --user 1000:1000 php composer <cmd>
 
 Все PK — UUID v7 (`Symfony\Component\Uid\Uuid::v7()`). В Postgres хранятся в нативном типе `UUID` (через `Symfony\Bridge\Doctrine\Types\UuidType`, зарегистрирован в `config/packages/doctrine.yaml`). UUID v7 сортируется по времени создания, что хорошо ложится на B-tree индекс PK.
 
+## Telegram
+
+Библиотека: **nutgram/nutgram** v4. Бот работает в режиме long polling. Подробная архитектура — `docs/architecture/telegram.md`.
+
+### Компоненты
+
+- `App\Telegram\BotRunner` — создаёт Nutgram в runtime, регистрирует handlers, запускает polling. Nutgram создаётся вручную (не через DI) — его конструктор бросает исключение при пустом токене.
+- `App\Telegram\HandlerRegistry` — регистрирует middleware и handlers на Nutgram.
+- `App\Telegram\Handler\` — handler-классы (invokable, один класс = одна команда).
+- `App\Telegram\Middleware\WhitelistMiddleware` — фильтр по `TELEGRAM_ALLOWED_USER_IDS`.
+- `App\Service\TelegramUserResolver` — find-or-create User по telegram_id.
+- `App\Service\RelativeTimeParser` — парсинг относительных и абсолютных форматов времени. Используется и в CLI (`TaskSnoozeCommand`), и в боте (`SnoozeHandler`).
+
+### Команды бота
+
+- `/start` — регистрация и приветствие
+- `/help` — справка по командам
+- `/list` — открытые задачи (до 10) с дедлайнами в зоне юзера
+- `/done <id>` — пометить задачу выполненной (первые 8+ символов UUID)
+- `/snooze <id> <когда>` — отложить задачу
+- (свободный текст) — создать задачу из текста
+
+### Сервис в docker-compose
+
+```yaml
+bot:
+  command: php bin/console app:bot:run -vv
+  restart: on-failure   # exit 0 (нет токена) — не перезапускает
+```
+
 ## Следующие шаги
 
-1. Подключить интеграцию с Telegram (webhook + long-polling вариант).
-2. Подключить Claude API через `symfony/http-client` + сервис-обёртку (создание задач из текста — `source = ai_parsed`).
-3. Добавить worker-контейнер `messenger:consume` на том же php-образе.
-4. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
+1. Подключить Claude API через `symfony/http-client` + сервис-обёртку (создание задач из текста — `source = ai_parsed`).
+2. Добавить worker-контейнер `messenger:consume` на том же php-образе.
+3. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
+4. Перейти на webhook (когда будет публичный URL/tunneling).

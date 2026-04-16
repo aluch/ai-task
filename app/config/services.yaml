@@ -7,6 +7,8 @@
 # Put parameters here that don't need to change on each machine where the app is deployed
 # https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
 parameters:
+    telegram.bot_token: '%env(TELEGRAM_BOT_TOKEN)%'
+    telegram.allowed_user_ids: '%env(TELEGRAM_ALLOWED_USER_IDS)%'
 
 services:
     # default configuration for services in *this* file
@@ -19,5 +21,11 @@ services:
     App\:
         resource: '../src/'
 
-    # add more service definitions when explicit configuration is needed
-    # please note that last definitions always *replace* previous ones
+    # Telegram middleware/handlers
+    App\Telegram\Middleware\WhitelistMiddleware:
+        arguments:
+            $allowedUserIds: '%telegram.allowed_user_ids%'
+
+    App\Command\BotRunCommand:
+        arguments:
+            $telegramToken: '%telegram.bot_token%'
