@@ -121,9 +121,17 @@ class FreeTextHandler
         $lines = ['✅ Задача создана', ''];
         $lines[] = "📝 {$task->getTitle()}";
 
+        if ($dto->description !== null) {
+            $lines[] = $dto->description;
+        }
+
         if ($task->getDeadline() !== null) {
             $deadlineLocal = $task->getDeadline()->setTimezone($userTz)->format('d.m H:i');
             $lines[] = "⏰ {$deadlineLocal}";
+        }
+
+        if ($dto->estimatedMinutes !== null) {
+            $lines[] = '⏱ ~' . $this->formatMinutes($dto->estimatedMinutes);
         }
 
         if ($dto->priority !== \App\Enum\TaskPriority::MEDIUM) {
@@ -151,5 +159,21 @@ class FreeTextHandler
         }
 
         return implode("\n", $lines);
+    }
+
+    private function formatMinutes(int $minutes): string
+    {
+        if ($minutes < 60) {
+            return "{$minutes} мин";
+        }
+
+        $hours = intdiv($minutes, 60);
+        $remainder = $minutes % 60;
+
+        if ($remainder === 0) {
+            return "{$hours} ч";
+        }
+
+        return "{$hours} ч {$remainder} мин";
     }
 }
