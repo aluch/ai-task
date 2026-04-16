@@ -19,6 +19,7 @@ RUN apk add --no-cache \
         zip \
         bcmath \
         sockets \
+        pcntl \
     && pecl install redis \
     && docker-php-ext-enable redis \
     && apk del autoconf g++ make $PHPIZE_DEPS \

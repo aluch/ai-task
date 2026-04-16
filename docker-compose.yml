@@ -76,6 +76,7 @@ services:
       redis:
         condition: service_started
     restart: on-failure
+    stop_grace_period: 35s
     networks:
       - ai-task
 
