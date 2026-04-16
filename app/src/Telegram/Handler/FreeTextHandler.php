@@ -122,8 +122,11 @@ class FreeTextHandler
         $lines[] = "📝 {$task->getTitle()}";
 
         if ($dto->description !== null) {
-            $lines[] = $dto->description;
+            $lines[] = '';
+            $lines[] = "💬 {$dto->description}";
         }
+
+        $lines[] = '';
 
         if ($task->getDeadline() !== null) {
             $deadlineLocal = $task->getDeadline()->setTimezone($userTz)->format('d.m H:i');
