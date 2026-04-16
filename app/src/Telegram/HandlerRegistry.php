@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Telegram\Handler\BlockHandler;
+use App\Telegram\Handler\DependencyCallbackHandler;
 use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
 use App\Telegram\Handler\FreeTextHandler;
@@ -29,6 +30,7 @@ class HandlerRegistry
         private readonly BlockHandler $blockHandler,
         private readonly UnblockHandler $unblockHandler,
         private readonly DepsHandler $depsHandler,
+        private readonly DependencyCallbackHandler $depCallbackHandler,
         private readonly FreeTextHandler $freeTextHandler,
         private readonly LoggerInterface $logger,
     ) {
@@ -55,6 +57,9 @@ class HandlerRegistry
         $bot->onCommand('unblock {args}', $this->unblockHandler);
         $bot->onCommand('deps', $this->depsHandler);
         $bot->onCommand('deps {args}', $this->depsHandler);
+
+        // Callback queries для интерактивных зависимостей
+        $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
 
         $freeTextHandler = $this->freeTextHandler;
         $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {

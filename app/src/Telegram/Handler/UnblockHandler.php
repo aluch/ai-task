@@ -9,6 +9,8 @@ use App\Repository\TaskRepository;
 use App\Service\TelegramUserResolver;
 use Doctrine\ORM\EntityManagerInterface;
 use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
 
 class UnblockHandler
 {
@@ -24,27 +26,43 @@ class UnblockHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        $args = trim(substr($text, 9)); // strip "/unblock "
-        $parts = preg_split('/\s+/', $args, 2);
-        if (count($parts) < 2) {
-            $bot->sendMessage(text: 'Использование: /unblock <task_id> <blocker_id>');
+        $cmdArgs = trim(substr($text, 9)); // strip "/unblock "
+        $parts = preg_split('/\s+/', $cmdArgs, 2);
+
+        if ($cmdArgs === '' || count($parts) < 2) {
+            if ($cmdArgs !== '' && count($parts) === 1) {
+                $bot->sendMessage(text: "Использование: /unblock <task_id> <blocker_id>\nИли /unblock без аргументов для интерактивного выбора.");
+
+                return;
+            }
+
+            $this->startInteractiveFlow($bot, $user);
 
             return;
         }
 
         [$blockedShort, $blockerShort] = $parts;
+        $this->removeLink($bot, $user, $blockedShort, $blockerShort);
+    }
 
+    public function removeLink(
+        Nutgram $bot,
+        \App\Entity\User $user,
+        string $blockedShort,
+        string $blockerShort,
+        bool $editMessage = false,
+    ): void {
         $blockedMatches = $this->findByShortId($blockedShort, $user);
         $blockerMatches = $this->findByShortId($blockerShort, $user);
 
         if ($blockedMatches === [] || $blockerMatches === []) {
-            $bot->sendMessage(text: 'Одна из задач не найдена.');
+            $this->reply($bot, 'Одна из задач не найдена.', $editMessage);
 
             return;
         }
 
         if (count($blockedMatches) > 1 || count($blockerMatches) > 1) {
-            $bot->sendMessage(text: 'Один из ID неоднозначен, уточни (больше символов).');
+            $this->reply($bot, 'Один из ID неоднозначен.', $editMessage);
 
             return;
         }
@@ -53,7 +71,7 @@ class UnblockHandler
         $blocker = $blockerMatches[0];
 
         if (!$blocked->getBlockedBy()->contains($blocker)) {
-            $bot->sendMessage(text: 'Связи между этими задачами нет.');
+            $this->reply($bot, 'Связи между этими задачами нет.', $editMessage);
 
             return;
         }
@@ -61,7 +79,53 @@ class UnblockHandler
         $blocked->removeBlocker($blocker);
         $this->em->flush();
 
-        $bot->sendMessage(text: "🔓 Связь убрана: «{$blocked->getTitle()}» больше не зависит от «{$blocker->getTitle()}».");
+        $this->reply(
+            $bot,
+            "🔓 Связь убрана: «{$blocked->getTitle()}» больше не зависит от «{$blocker->getTitle()}».",
+            $editMessage,
+        );
+    }
+
+    private function startInteractiveFlow(Nutgram $bot, \App\Entity\User $user): void
+    {
+        $tasks = $this->tasks->findForUser($user, limit: 50);
+
+        // Показываем только задачи, у которых есть блокеры
+        $blockedTasks = array_filter($tasks, fn (Task $t) => $t->getBlockedBy()->count() > 0);
+
+        if ($blockedTasks === []) {
+            $bot->sendMessage(text: 'Нет задач с блокерами.');
+
+            return;
+        }
+
+        $keyboard = InlineKeyboardMarkup::make();
+        $shown = 0;
+        foreach ($blockedTasks as $task) {
+            if ($shown >= 8) {
+                break;
+            }
+            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
+            $label = mb_substr($task->getTitle(), 0, 30);
+            $keyboard->addRow(
+                InlineKeyboardButton::make(text: "⛔ {$label}", callback_data: "dep:u1:{$shortId}"),
+            );
+            $shown++;
+        }
+
+        $bot->sendMessage(
+            text: 'У какой задачи убрать блокер?',
+            reply_markup: $keyboard,
+        );
+    }
+
+    private function reply(Nutgram $bot, string $text, bool $edit): void
+    {
+        if ($edit) {
+            $bot->editMessageText(text: $text, reply_markup: null);
+        } else {
+            $bot->sendMessage(text: $text);
+        }
     }
 
     /**
