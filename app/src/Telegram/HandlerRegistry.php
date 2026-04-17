@@ -8,6 +8,8 @@ use App\Telegram\Handler\BlockHandler;
 use App\Telegram\Handler\DependencyCallbackHandler;
 use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
+use App\Telegram\Handler\FreeCallbackHandler;
+use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\FreeTextHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
@@ -33,6 +35,8 @@ class HandlerRegistry
         private readonly DepsHandler $depsHandler,
         private readonly DependencyCallbackHandler $depCallbackHandler,
         private readonly TaskActionCallbackHandler $taskActionCallbackHandler,
+        private readonly FreeHandler $freeHandler,
+        private readonly FreeCallbackHandler $freeCallbackHandler,
         private readonly FreeTextHandler $freeTextHandler,
         private readonly LoggerInterface $logger,
     ) {
@@ -59,12 +63,15 @@ class HandlerRegistry
         $bot->onCommand('unblock {args}', $this->unblockHandler);
         $bot->onCommand('deps', $this->depsHandler);
         $bot->onCommand('deps {args}', $this->depsHandler);
+        $bot->onCommand('free', $this->freeHandler);
+        $bot->onCommand('free {args}', $this->freeHandler);
 
         // Callback queries
         $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
         $bot->onCallbackQueryData('done:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('snz:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('deps:{data}', $this->taskActionCallbackHandler);
+        $bot->onCallbackQueryData('free:{data}', $this->freeCallbackHandler);
 
         $freeTextHandler = $this->freeTextHandler;
         $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {

@@ -171,6 +171,7 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `/block <task> <blocker>` — задача task заблокирована blocker'ом (проверка циклов)
 - `/unblock <task> <blocker>` — убрать зависимость
 - `/deps <id>` — показать зависимости задачи
+- `/free <время> [контекст]` — AI подбирает задачи под свободное время и контекст (главная фича). Inline-кнопки: Беру/Другие/Не сейчас. Состояние в Redis.
 - (свободный текст) — AI-парсинг задачи через Claude (title, deadline, priority, contexts)
 
 ### Сервис в docker-compose
@@ -189,25 +190,30 @@ bot:
 
 - `App\AI\ClaudeClient` — обёртка вокруг Symfony HttpClient для Anthropic Messages API. Классифицирует ошибки: `ClaudeClientException` (4xx), `ClaudeTransientException` (5xx/сеть), `ClaudeRateLimitException` (429). Логирует каждый вызов: модель, tokens, elapsed.
 - `App\AI\TaskParser` — превращает свободный текст в `ParsedTaskDTO`. System prompt содержит текущее время пользователя, его timezone и список контекстов из БД. Ответ — JSON, парсится с fallback.
+- `App\AI\TaskAdvisor` — подбирает оптимальный набор задач под свободное время и контекст (для команды `/free`). Отличается от парсера: не извлечение, а рассуждение (приоритеты, маршруты, группировка). Используется Sonnet вместо Haiku. Подробности — `docs/architecture/task-advisor.md`.
 - `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
 - `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
+- `App\AI\DTO\TaskSuggestionDTO` + `SuggestedTask` — DTO подборки задач (suggestions, reasoning, totalEstimatedMinutes, noMatchReason).
+- `App\Service\RelativeTimeParser::parseToMinutes(string $input): int` — парсит длительность (30m, 1h, 1.5h, 90m, 2ч, 45м, 120). Используется в `/free` и `/snooze`.
+- `App\Service\FreeSuggestionStore` — Redis-хранилище состояния предложения для `/free` (task_ids, excluded_ids, reroll_count). TTL 1 час. В callback_data не помещаются UUID, поэтому state в Redis + короткий ключ в callback.
 
 ### Модели
 
 | Use case | Модель | Переменная |
 |---|---|---|
 | Парсинг задач | `claude-haiku-4-5` | `ANTHROPIC_MODEL_PARSER` |
+| Подбор задач (`/free`) | `claude-sonnet-4-6` | `ANTHROPIC_MODEL_ADVISOR` |
 
-Haiku выбрана для парсинга: достаточно умна для структурного извлечения, значительно дешевле и быстрее Opus/Sonnet. Переключение через `.env` без передеплоя.
+Haiku выбрана для парсинга: достаточно умна для структурного извлечения, значительно дешевле и быстрее Opus/Sonnet. Для подбора нужна Sonnet — несколько конкурирующих критериев (приоритет, контекст, маршрут, время) Haiku путает. Переключение через `.env` без передеплоя.
 
 ### Переменные окружения
 
 - `ANTHROPIC_API_KEY` — API key от Anthropic (обязателен для AI-функций)
 - `ANTHROPIC_MODEL_PARSER` — модель парсера (default `claude-haiku-4-5`)
+- `ANTHROPIC_MODEL_ADVISOR` — модель advisor'а (default `claude-sonnet-4-6`)
 
 ## Следующие шаги
 
 1. Добавить worker-контейнер `messenger:consume` на том же php-образе.
 2. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
-3. Реализовать `/free` — AI-подбор задач по контексту пользователя.
-4. Перейти на webhook (когда будет публичный URL/tunneling).
+3. Перейти на webhook (когда будет публичный URL/tunneling).

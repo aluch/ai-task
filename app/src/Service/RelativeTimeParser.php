@@ -60,4 +60,40 @@ class RelativeTimeParser
 
         return $raw;
     }
+
+    /**
+     * Парсит длительность в минутах. Поддерживает латиницу (m, h) и кириллицу
+     * (м, ч), дробные часы (1.5h → 90), чистое число = минуты.
+     *
+     * @throws \InvalidArgumentException при некорректном формате
+     */
+    public function parseToMinutes(string $input): int
+    {
+        $raw = trim($input);
+        if ($raw === '') {
+            throw new \InvalidArgumentException('Empty duration.');
+        }
+
+        // Нормализуем: нижний регистр, запятая → точка для дробных, убираем пробелы
+        $normalized = str_replace([',', ' '], ['.', ''], mb_strtolower($raw));
+
+        // Паттерн: число + опциональная единица (m/h/м/ч)
+        if (preg_match('/^(\d+(?:\.\d+)?)\s*(m|h|м|ч)?$/u', $normalized, $m) !== 1) {
+            throw new \InvalidArgumentException(sprintf('Cannot parse duration: "%s".', $input));
+        }
+
+        $value = (float) $m[1];
+        $unit = $m[2] ?? '';
+
+        $minutes = match ($unit) {
+            'h', 'ч' => (int) round($value * 60),
+            'm', 'м', '' => (int) round($value),
+        };
+
+        if ($minutes <= 0) {
+            throw new \InvalidArgumentException(sprintf('Duration must be positive: "%s".', $input));
+        }
+
+        return $minutes;
+    }
 }

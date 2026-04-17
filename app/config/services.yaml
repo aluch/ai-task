@@ -11,6 +11,8 @@ parameters:
     telegram.allowed_user_ids: '%env(TELEGRAM_ALLOWED_USER_IDS)%'
     anthropic.api_key: '%env(ANTHROPIC_API_KEY)%'
     anthropic.model_parser: '%env(ANTHROPIC_MODEL_PARSER)%'
+    anthropic.model_advisor: '%env(ANTHROPIC_MODEL_ADVISOR)%'
+    redis.url: '%env(REDIS_URL)%'
 
 services:
     # default configuration for services in *this* file
@@ -40,3 +42,11 @@ services:
     App\AI\TaskParser:
         arguments:
             $model: '%anthropic.model_parser%'
+
+    App\AI\TaskAdvisor:
+        arguments:
+            $model: '%anthropic.model_advisor%'
+
+    App\Service\FreeSuggestionStore:
+        arguments:
+            $redisUrl: '%redis.url%'

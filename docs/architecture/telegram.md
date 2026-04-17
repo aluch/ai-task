@@ -83,6 +83,7 @@
 | `/block` или `/block <task> <blocker>` | Зависимость: task заблокирована blocker'ом. Без аргументов — интерактивный двухшаговый выбор через кнопки |
 | `/unblock` или `/unblock <task> <blocker>` | Убрать зависимость. Без аргументов — показывает только задачи с блокерами |
 | `/deps` или `/deps <id>` | Показать зависимости задачи (blockedBy + blocking). Без аргументов — inline-кнопки для выбора |
+| `/free <время> [контекст]` | AI подбирает задачи под свободное время и контекст. Примеры: `/free 2h`, `/free 30m дома`, `/free 1h на улице`. Ответ — план с inline-кнопками ✅ Беру! / 🔄 Другие варианты / ❌ Не сейчас |
 | (свободный текст) | Создать задачу из текста сообщения (AI-парсинг через Claude) |
 
 ### Интерактивный flow (inline-кнопки)
@@ -92,6 +93,7 @@
 Callback handler'ы:
 - `DependencyCallbackHandler` — `dep:s1:*`, `dep:s2:*:*`, `dep:u1:*`, `dep:u2:*:*` (block/unblock flow)
 - `TaskActionCallbackHandler` — `done:*` (mark done), `snz:s1:*`/`snz:s2:*:*` (snooze flow), `deps:*` (show deps)
+- `FreeCallbackHandler` — `free:<key>:take|reroll|dismiss`. State хранится в Redis (`free:<12hex>`, TTL 1 час) — в callback_data не помещаются UUID задач. Лимит rerolls: 3 подряд. См. `docs/architecture/task-advisor.md`.
 
 Ограничения:
 - Максимум 8 кнопок (без пагинации), самые свежие задачи
