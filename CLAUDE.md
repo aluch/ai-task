@@ -52,7 +52,41 @@ Telegram-бот с интеграцией Claude API для управления
 - Открывающий тег — только `<?php`, закрывающий `?>` в чисто-PHP-файлах не ставить.
 - LF line endings, 4 пробела, одна пустая строка в конце файла.
 - **Время — всё в UTC.** В БД все datetime-поля — `TIMESTAMPTZ`, в коде создавать `\DateTimeImmutable` всегда с явной зоной UTC: `new \DateTimeImmutable('now', new \DateTimeZone('UTC'))`. Никаких `new \DateTimeImmutable()` без зоны — он подтянет `date.timezone` из php.ini (Europe/Tallinn) и сломает абсолютные моменты. Пользовательский ввод парсить в зоне юзера и `setTimezone('UTC')` перед сохранением. Конвертация в локальную зону — только на выводе (CLI/бот). Подробности — `docs/architecture/data-model.md`, секция «Работа со временем».
-- **Long-running процессы и Doctrine.** В коде, который живёт дольше одного HTTP-запроса (Telegram-бот, Messenger воркеры, планировщик), **никогда не инжектить `EntityManagerInterface` напрямую через DI**. Вместо этого инжектить `Doctrine\Persistence\ManagerRegistry` и получать EM свежим при каждом использовании: `$em = $registry->getManager()`. Причина: при DBALException EM переходит в состояние closed, `$registry->resetManager()` создаёт новый instance, но прямые ссылки на старый остаются и молча не работают — флаши тихо ничего не пишут, clear() дёргается на закрытом объекте. Registry всегда отдаёт живой EM. Распространяется на: `BotRunner`, все handler'ы бота (которые работают с БД), будущие Messenger workers, Scheduler handlers. Для обычных HTTP-контроллеров (короткоживущий запрос) можно продолжать инжектить `EntityManagerInterface` напрямую.
+- **Long-running процессы и Doctrine.** В коде, который живёт дольше одного HTTP-запроса (Telegram-бот, Messenger воркеры, планировщик), **никогда не инжектить `EntityManagerInterface` напрямую** и **никогда не инжектить Doctrine-репозитории через конструктор**. Репозитории (`ServiceEntityRepository`) захватывают EM в свойство `$_em` при старте — после `$registry->resetManager()` внутри репо остаётся stale ссылка, find() возвращает сущность в identity map старого EM, а flush по текущему EM молча не пишет ничего. Правильный паттерн для любой работы с сущностями:
+
+  ```php
+  // В конструкторе — только ManagerRegistry
+  public function __construct(private ManagerRegistry $doctrine) {}
+
+  // В методе — всегда свежий EM и свежий repo из него
+  $em = $this->doctrine->getManager();
+  $repo = $em->getRepository(Task::class);
+  $task = $repo->find($uuid);
+  // ... мутации ...
+  $em->flush();
+  ```
+
+  Что **НЕ делать**:
+
+  ```php
+  // ❌ Прямой инжект EM — ссылка устаревает после resetManager
+  public function __construct(private EntityManagerInterface $em) {}
+
+  // ❌ Прямой инжект репозитория — внутри него $_em устаревает так же
+  public function __construct(
+      private TaskRepository $tasks,
+      private ManagerRegistry $doctrine,
+  ) {}
+
+  $task = $this->tasks->find($uuid);           // ← старый EM
+  $this->doctrine->getManager()->flush();      // ← новый EM, flush в пустоту
+  ```
+
+  Причина: при `DBALException` EM переходит в состояние closed, `$registry->resetManager()` создаёт новый instance, но прямые ссылки (в DI-инжектных EM и репозиториях) остаются на старый. Registry всегда отдаёт живой EM, `$em->getRepository()` — репозиторий, привязанный к этому живому EM.
+
+  Распространяется на: `BotRunner`, все handler'ы бота (которые работают с БД), TaskAdvisor/TaskParser (не работают с БД напрямую, но важно для их будущих расширений), Messenger workers, Scheduler handlers. **Исключение**: read-only операции в HTTP-контроллерах и обычных CLI-командах (короткоживущий процесс, resetManager не случается) — там прямая инжекция EM и репозиториев безопасна.
+
+  Если после обновления встретишь в коде прямой инжект репозитория в конструкторе long-running класса — это кандидат на рефакторинг при следующем касании файла.
 
 ## Symfony
 
