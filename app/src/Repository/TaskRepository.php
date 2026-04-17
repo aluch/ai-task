@@ -7,17 +7,30 @@ namespace App\Repository;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Enum\TaskStatus;
+use App\Service\SnoozeReactivator;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
+use Symfony\Contracts\Service\Attribute\SubscribedService;
 
 /**
  * @extends ServiceEntityRepository<Task>
  */
 class TaskRepository extends ServiceEntityRepository
 {
+    private ?SnoozeReactivator $reactivator = null;
+
     public function __construct(ManagerRegistry $registry)
     {
         parent::__construct($registry, Task::class);
+    }
+
+    /**
+     * Setter-инъекция чтобы избежать циклической зависимости:
+     * SnoozeReactivator использует EntityManager, который зависит от репозиториев.
+     */
+    public function setReactivator(SnoozeReactivator $reactivator): void
+    {
+        $this->reactivator = $reactivator;
     }
 
     /**
@@ -25,6 +38,8 @@ class TaskRepository extends ServiceEntityRepository
      */
     public function findForUser(User $user, ?TaskStatus $status = null, int $limit = 20): array
     {
+        $this->reactivator?->reactivateExpired($user);
+
         $qb = $this->createQueryBuilder('t')
             ->andWhere('t.user = :user')
             ->setParameter('user', $user)

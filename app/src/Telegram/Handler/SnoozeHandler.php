@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace App\Telegram\Handler;
 
-use App\Entity\Task;
+use App\Exception\TaskIdException;
 use App\Repository\TaskRepository;
 use App\Service\RelativeTimeParser;
+use App\Service\TaskIdResolver;
 use App\Service\TelegramUserResolver;
-use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
@@ -20,7 +21,8 @@ class SnoozeHandler
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
-        private readonly EntityManagerInterface $em,
+        private readonly TaskIdResolver $idResolver,
+        private readonly ManagerRegistry $doctrine,
         private readonly RelativeTimeParser $timeParser,
     ) {
     }
@@ -30,43 +32,32 @@ class SnoozeHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        $cmdArgs = trim(substr($text, 8)); // strip "/snooze "
-        $spacePos = strpos($cmdArgs, ' ');
-
-        if ($cmdArgs === '' || $spacePos === false) {
-            if ($cmdArgs !== '' && $spacePos === false) {
-                // Только ID без времени
-                $bot->sendMessage(text: "Использование: /snooze <id> <когда>\nИли /snooze без аргументов для интерактивного выбора.");
-
-                return;
-            }
-
+        $cmdArgs = trim(substr($text, 8)); // strip "/snooze"
+        if ($cmdArgs === '') {
             $this->showInteractive($bot, $user);
 
             return;
         }
 
-        // С аргументами — старый режим
-        $shortId = substr($cmdArgs, 0, $spacePos);
+        $spacePos = strpos($cmdArgs, ' ');
+        if ($spacePos === false) {
+            $bot->sendMessage(text: "Использование: /snooze <uuid> <когда>\nИли /snooze без аргументов для интерактивного выбора.");
+
+            return;
+        }
+
+        $uuidOrPrefix = substr($cmdArgs, 0, $spacePos);
         $rawUntil = trim(substr($cmdArgs, $spacePos + 1));
 
-        $matches = $this->findByShortId($shortId, $user);
-
-        if ($matches === []) {
-            $bot->sendMessage(text: "Задача с ID {$shortId}… не найдена.");
-
-            return;
-        }
-
-        if (count($matches) > 1) {
-            $bot->sendMessage(text: "Найдено несколько задач по ID {$shortId}…, уточни ID.");
+        try {
+            $task = $this->idResolver->resolve($uuidOrPrefix, $user);
+        } catch (TaskIdException $e) {
+            $bot->sendMessage(text: $e->getMessage());
 
             return;
         }
 
-        $task = $matches[0];
         $userTz = new \DateTimeZone($user->getTimezone());
-
         $until = $this->timeParser->parse($rawUntil, $userTz);
         if ($until === null) {
             $bot->sendMessage(text: "Не могу распознать время: {$rawUntil}\nПримеры: +2h, +1d, tomorrow 09:00, 2026-04-20 18:00");
@@ -81,7 +72,7 @@ class SnoozeHandler
         }
 
         $task->snooze($until);
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
 
         $localUntil = $until->setTimezone($userTz);
         $bot->sendMessage(
@@ -105,13 +96,10 @@ class SnoozeHandler
             if ($shown >= self::MAX_BUTTONS) {
                 break;
             }
-            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($task->getTitle(), 0, 30);
-            if (mb_strlen($task->getTitle()) > 30) {
-                $label .= '…';
-            }
+            $uuid = $task->getId()->toRfc4122();
+            $label = $this->truncate($task->getTitle(), 30);
             $keyboard->addRow(
-                InlineKeyboardButton::make(text: $label, callback_data: "snz:s1:{$shortId}"),
+                InlineKeyboardButton::make(text: $label, callback_data: "snz:s1:{$uuid}"),
             );
             $shown++;
         }
@@ -122,16 +110,12 @@ class SnoozeHandler
         );
     }
 
-    /**
-     * @return Task[]
-     */
-    private function findByShortId(string $prefix, \App\Entity\User $user): array
+    private function truncate(string $text, int $max): string
     {
-        $all = $this->tasks->findBy(['user' => $user]);
+        if (mb_strlen($text) <= $max) {
+            return $text;
+        }
 
-        return array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $prefix),
-        ));
+        return mb_substr($text, 0, $max) . '…';
     }
 }

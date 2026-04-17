@@ -5,12 +5,13 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
-use App\Enum\TaskStatus;
 use App\Exception\CyclicDependencyException;
+use App\Exception\TaskIdException;
 use App\Repository\TaskRepository;
 use App\Service\DependencyValidator;
+use App\Service\TaskIdResolver;
 use App\Service\TelegramUserResolver;
-use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
@@ -23,7 +24,8 @@ class BlockHandler
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
         private readonly DependencyValidator $depValidator,
-        private readonly EntityManagerInterface $em,
+        private readonly TaskIdResolver $idResolver,
+        private readonly ManagerRegistry $doctrine,
     ) {
     }
 
@@ -32,55 +34,46 @@ class BlockHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        $cmdArgs = trim(substr($text, 7)); // strip "/block "
-        $parts = preg_split('/\s+/', $cmdArgs, 2);
-
-        if ($cmdArgs === '' || count($parts) < 2) {
-            if ($cmdArgs !== '' && count($parts) === 1) {
-                $bot->sendMessage(text: "Использование: /block <task_id> <blocker_id>\nИли /block без аргументов для интерактивного выбора.");
-
-                return;
-            }
-
+        $cmdArgs = trim(substr($text, 7)); // strip "/block"
+        if ($cmdArgs === '') {
             $this->startInteractiveFlow($bot, $user);
 
             return;
         }
 
-        [$blockedShort, $blockerShort] = $parts;
-        $this->createLink($bot, $user, $blockedShort, $blockerShort);
+        $parts = preg_split('/\s+/', $cmdArgs, 2);
+        if (count($parts) < 2) {
+            $bot->sendMessage(text: "Использование: /block <task_uuid> <blocker_uuid>\nИли /block без аргументов для интерактивного выбора.");
+
+            return;
+        }
+
+        [$blockedArg, $blockerArg] = $parts;
+        $this->createLink($bot, $user, $blockedArg, $blockerArg, editMessage: false);
     }
 
     public function createLink(
         Nutgram $bot,
         \App\Entity\User $user,
-        string $blockedShort,
-        string $blockerShort,
+        string $blockedIdOrPrefix,
+        string $blockerIdOrPrefix,
         bool $editMessage = false,
     ): void {
-        $blockedMatches = $this->findByShortId($blockedShort, $user);
-        $blockerMatches = $this->findByShortId($blockerShort, $user);
-
-        if ($blockedMatches === []) {
-            $this->reply($bot, "Задача {$blockedShort}… не найдена.", $editMessage);
-
-            return;
-        }
-
-        if ($blockerMatches === []) {
-            $this->reply($bot, "Задача {$blockerShort}… не найдена.", $editMessage);
+        try {
+            $blocked = $this->idResolver->resolve($blockedIdOrPrefix, $user);
+        } catch (TaskIdException $e) {
+            $this->reply($bot, "Блокируемая: {$e->getMessage()}", $editMessage);
 
             return;
         }
 
-        if (count($blockedMatches) > 1 || count($blockerMatches) > 1) {
-            $this->reply($bot, 'Один из ID неоднозначен, уточни (больше символов).', $editMessage);
+        try {
+            $blocker = $this->idResolver->resolve($blockerIdOrPrefix, $user);
+        } catch (TaskIdException $e) {
+            $this->reply($bot, "Блокер: {$e->getMessage()}", $editMessage);
 
             return;
         }
-
-        $blocked = $blockedMatches[0];
-        $blocker = $blockerMatches[0];
 
         if ($blocked->getId()->equals($blocker->getId())) {
             $this->reply($bot, '❌ Задача не может блокировать саму себя.', $editMessage);
@@ -103,7 +96,7 @@ class BlockHandler
         }
 
         $blocked->addBlocker($blocker);
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
 
         $this->reply($bot, implode("\n", [
             '🔗 Связь создана',
@@ -129,10 +122,10 @@ class BlockHandler
             if ($shown >= self::MAX_BUTTONS) {
                 break;
             }
-            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($task->getTitle(), 0, 30);
+            $uuid = $task->getId()->toRfc4122();
+            $label = $this->truncate($task->getTitle(), 30);
             $keyboard->addRow(
-                InlineKeyboardButton::make(text: $label, callback_data: "dep:s1:{$shortId}"),
+                InlineKeyboardButton::make(text: $label, callback_data: "dep:s1:{$uuid}"),
             );
             $shown++;
         }
@@ -143,6 +136,15 @@ class BlockHandler
         );
     }
 
+    private function truncate(string $text, int $max): string
+    {
+        if (mb_strlen($text) <= $max) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, $max) . '…';
+    }
+
     private function reply(Nutgram $bot, string $text, bool $edit): void
     {
         if ($edit) {
@@ -150,18 +152,5 @@ class BlockHandler
         } else {
             $bot->sendMessage(text: $text);
         }
-    }
-
-    /**
-     * @return Task[]
-     */
-    private function findByShortId(string $prefix, \App\Entity\User $user): array
-    {
-        $all = $this->tasks->findBy(['user' => $user]);
-
-        return array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $prefix),
-        ));
     }
 }

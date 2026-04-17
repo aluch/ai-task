@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
+use App\Exception\TaskIdException;
 use App\Repository\TaskRepository;
+use App\Service\TaskIdResolver;
 use App\Service\TelegramUserResolver;
-use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
@@ -19,7 +21,8 @@ class DoneHandler
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
-        private readonly EntityManagerInterface $em,
+        private readonly TaskIdResolver $idResolver,
+        private readonly ManagerRegistry $doctrine,
     ) {
     }
 
@@ -28,40 +31,39 @@ class DoneHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        $shortId = trim(substr($text, 6)); // strip "/done "
-        if ($shortId === '') {
+        $arg = trim(substr($text, 6)); // strip "/done"
+        if ($arg === '') {
             $this->showInteractive($bot, $user);
 
             return;
         }
 
-        $this->markDone($bot, $user, $shortId, editMessage: false);
+        try {
+            $task = $this->idResolver->resolve($arg, $user);
+        } catch (TaskIdException $e) {
+            $bot->sendMessage(text: $e->getMessage());
+
+            return;
+        }
+
+        $this->markDoneTask($bot, $task, editMessage: false);
     }
 
-    public function markDone(Nutgram $bot, \App\Entity\User $user, string $shortId, bool $editMessage): void
+    public function markDoneById(Nutgram $bot, \App\Entity\User $user, string $uuidOrPrefix, bool $editMessage): void
     {
-        $matches = $this->findByShortId($shortId, $user);
-
-        if ($matches === []) {
-            $this->reply($bot, "Задача с ID {$shortId}… не найдена среди твоих задач.", $editMessage);
-
-            return;
-        }
-
-        if (count($matches) > 1) {
-            $lines = ["Найдено несколько задач по ID {$shortId}…:"];
-            foreach ($matches as $t) {
-                $lines[] = '  ' . substr($t->getId()->toRfc4122(), 0, 13) . '… — ' . $t->getTitle();
-            }
-            $lines[] = '';
-            $lines[] = 'Уточни ID (больше символов).';
-            $this->reply($bot, implode("\n", $lines), $editMessage);
+        try {
+            $task = $this->idResolver->resolve($uuidOrPrefix, $user);
+        } catch (TaskIdException $e) {
+            $this->reply($bot, $e->getMessage(), $editMessage);
 
             return;
         }
 
-        $task = $matches[0];
+        $this->markDoneTask($bot, $task, $editMessage);
+    }
 
+    private function markDoneTask(Nutgram $bot, Task $task, bool $editMessage): void
+    {
         $wasBlockingBefore = [];
         foreach ($task->getBlockedTasks() as $downstream) {
             if ($downstream->isBlocked()) {
@@ -70,7 +72,7 @@ class DoneHandler
         }
 
         $task->markDone();
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
 
@@ -85,8 +87,7 @@ class DoneHandler
             $lines[] = '';
             $lines[] = '🔓 Разблокирована:';
             foreach ($unblocked as $t) {
-                $sid = substr($t->getId()->toRfc4122(), 0, 8);
-                $lines[] = "  • {$t->getTitle()} — {$sid}";
+                $lines[] = "  • {$t->getTitle()}";
             }
         }
 
@@ -109,13 +110,10 @@ class DoneHandler
             if ($shown >= self::MAX_BUTTONS) {
                 break;
             }
-            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($task->getTitle(), 0, 30);
-            if (mb_strlen($task->getTitle()) > 30) {
-                $label .= '…';
-            }
+            $uuid = $task->getId()->toRfc4122();
+            $label = $this->truncate($task->getTitle(), 30);
             $keyboard->addRow(
-                InlineKeyboardButton::make(text: $label, callback_data: "done:{$shortId}"),
+                InlineKeyboardButton::make(text: $label, callback_data: "done:{$uuid}"),
             );
             $shown++;
         }
@@ -126,6 +124,15 @@ class DoneHandler
         );
     }
 
+    private function truncate(string $text, int $max): string
+    {
+        if (mb_strlen($text) <= $max) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, $max) . '…';
+    }
+
     private function reply(Nutgram $bot, string $text, bool $edit): void
     {
         if ($edit) {
@@ -133,18 +140,5 @@ class DoneHandler
         } else {
             $bot->sendMessage(text: $text);
         }
-    }
-
-    /**
-     * @return Task[]
-     */
-    private function findByShortId(string $prefix, \App\Entity\User $user): array
-    {
-        $all = $this->tasks->findBy(['user' => $user]);
-
-        return array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $prefix),
-        ));
     }
 }

@@ -116,7 +116,6 @@ class FreeTextHandler
     private function formatResponse(Task $task, ParsedTaskDTO $dto, \App\Entity\User $user): string
     {
         $userTz = new \DateTimeZone($user->getTimezone());
-        $shortId = substr($task->getId()->toRfc4122(), 0, 8);
 
         $lines = ['✅ Задача создана', ''];
         $lines[] = "📝 {$task->getTitle()}";
@@ -152,9 +151,6 @@ class FreeTextHandler
         if ($dto->contextCodes !== []) {
             $lines[] = '🏷 ' . implode(', ', $dto->contextCodes);
         }
-
-        $lines[] = '';
-        $lines[] = "ID: {$shortId}";
 
         if ($dto->parserNotes !== null) {
             $lines[] = '';

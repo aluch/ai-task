@@ -50,3 +50,12 @@ services:
     App\Service\FreeSuggestionStore:
         arguments:
             $redisUrl: '%redis.url%'
+
+    App\Service\DependencyStateStore:
+        arguments:
+            $redisUrl: '%redis.url%'
+
+    # Setter injection чтобы избежать цикла: SnoozeReactivator → EM → Repository.
+    App\Repository\TaskRepository:
+        calls:
+            - setReactivator: ['@App\Service\SnoozeReactivator']

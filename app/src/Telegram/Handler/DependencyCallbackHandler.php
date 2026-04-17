@@ -5,12 +5,26 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
+use App\Entity\User;
 use App\Repository\TaskRepository;
+use App\Service\DependencyStateStore;
 use App\Service\TelegramUserResolver;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
+use Symfony\Component\Uid\Uuid;
 
+/**
+ * Callback-протокол для /block и /unblock flow:
+ *
+ *   dep:s1:<blocked_uuid>             — step 1 block: выбрана блокируемая
+ *   dep:s2:<state_key>:<blocker_uuid> — step 2 block: выбран блокер
+ *   dep:u1:<blocked_uuid>             — step 1 unblock: выбрана задача
+ *   dep:u2:<state_key>:<blocker_uuid> — step 2 unblock: выбран блокер к удалению
+ *
+ * state_key хранит blocked_uuid в Redis (TTL 10 мин). Это нужно потому что
+ * 2 полных UUID в callback_data не помещаются (64-байт лимит Telegram).
+ */
 class DependencyCallbackHandler
 {
     private const MAX_BUTTONS = 8;
@@ -20,6 +34,7 @@ class DependencyCallbackHandler
         private readonly TaskRepository $tasks,
         private readonly BlockHandler $blockHandler,
         private readonly UnblockHandler $unblockHandler,
+        private readonly DependencyStateStore $stateStore,
     ) {
     }
 
@@ -46,19 +61,18 @@ class DependencyCallbackHandler
         };
     }
 
-    /**
-     * Пользователь выбрал задачу для блокировки → показать блокеры.
-     */
-    private function handleBlockStep1(Nutgram $bot, \App\Entity\User $user, string $blockedShort): void
+    private function handleBlockStep1(Nutgram $bot, User $user, string $blockedUuid): void
     {
-        $blocked = $this->findOne($blockedShort, $user);
+        $blocked = $this->findByUuid($blockedUuid, $user);
         if ($blocked === null) {
-            $bot->editMessageText(text: "Задача {$blockedShort}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
 
         $tasks = $this->tasks->findForUser($user, limit: self::MAX_BUTTONS + 1);
+
+        $stateKey = $this->stateStore->store($blockedUuid);
 
         $keyboard = InlineKeyboardMarkup::make();
         $shown = 0;
@@ -69,63 +83,65 @@ class DependencyCallbackHandler
             if ($task->getId()->equals($blocked->getId())) {
                 continue;
             }
-            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($task->getTitle(), 0, 30);
+            $uuid = $task->getId()->toRfc4122();
+            $label = $this->truncate($task->getTitle(), 30);
             $keyboard->addRow(
                 InlineKeyboardButton::make(
                     text: $label,
-                    callback_data: "dep:s2:{$blockedShort}:{$shortId}",
+                    callback_data: "dep:s2:{$stateKey}:{$uuid}",
                 ),
             );
             $shown++;
         }
 
-        $title = $blocked->getTitle();
         $bot->editMessageText(
-            text: "⛔ {$title}\n⬅️ заблокирована чем?",
+            text: "⛔ {$blocked->getTitle()}\n⬅️ заблокирована чем?",
             reply_markup: $keyboard,
         );
     }
 
-    /**
-     * Пользователь выбрал блокер → создать связь.
-     */
-    private function handleBlockStep2(
-        Nutgram $bot,
-        \App\Entity\User $user,
-        string $blockedShort,
-        string $blockerShort,
-    ): void {
-        $this->blockHandler->createLink($bot, $user, $blockedShort, $blockerShort, editMessage: true);
+    private function handleBlockStep2(Nutgram $bot, User $user, string $stateKey, string $blockerUuid): void
+    {
+        $blockedUuid = $this->stateStore->load($stateKey);
+        if ($blockedUuid === null) {
+            $bot->editMessageText(
+                text: '⏰ Сессия истекла, начни заново через /block.',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        $this->blockHandler->createLink($bot, $user, $blockedUuid, $blockerUuid, editMessage: true);
+        $this->stateStore->delete($stateKey);
     }
 
-    /**
-     * Пользователь выбрал заблокированную задачу → показать её блокеры.
-     */
-    private function handleUnblockStep1(Nutgram $bot, \App\Entity\User $user, string $blockedShort): void
+    private function handleUnblockStep1(Nutgram $bot, User $user, string $blockedUuid): void
     {
-        $blocked = $this->findOne($blockedShort, $user);
+        $blocked = $this->findByUuid($blockedUuid, $user);
         if ($blocked === null) {
-            $bot->editMessageText(text: "Задача {$blockedShort}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
 
         $blockers = $blocked->getBlockedBy()->toArray();
         if ($blockers === []) {
-            $bot->editMessageText(text: "У задачи «{$blocked->getTitle()}» нет блокеров.");
+            $bot->editMessageText(text: "У задачи «{$blocked->getTitle()}» нет блокеров.", reply_markup: null);
 
             return;
         }
 
+        $stateKey = $this->stateStore->store($blockedUuid);
+
         $keyboard = InlineKeyboardMarkup::make();
         foreach ($blockers as $blocker) {
-            $shortId = substr($blocker->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($blocker->getTitle(), 0, 30);
+            $uuid = $blocker->getId()->toRfc4122();
+            $label = $this->truncate($blocker->getTitle(), 30);
             $keyboard->addRow(
                 InlineKeyboardButton::make(
                     text: $label,
-                    callback_data: "dep:u2:{$blockedShort}:{$shortId}",
+                    callback_data: "dep:u2:{$stateKey}:{$uuid}",
                 ),
             );
         }
@@ -136,26 +152,41 @@ class DependencyCallbackHandler
         );
     }
 
-    /**
-     * Пользователь выбрал блокер для удаления → убрать связь.
-     */
-    private function handleUnblockStep2(
-        Nutgram $bot,
-        \App\Entity\User $user,
-        string $blockedShort,
-        string $blockerShort,
-    ): void {
-        $this->unblockHandler->removeLink($bot, $user, $blockedShort, $blockerShort, editMessage: true);
+    private function handleUnblockStep2(Nutgram $bot, User $user, string $stateKey, string $blockerUuid): void
+    {
+        $blockedUuid = $this->stateStore->load($stateKey);
+        if ($blockedUuid === null) {
+            $bot->editMessageText(
+                text: '⏰ Сессия истекла, начни заново через /unblock.',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        $this->unblockHandler->removeLink($bot, $user, $blockedUuid, $blockerUuid, editMessage: true);
+        $this->stateStore->delete($stateKey);
     }
 
-    private function findOne(string $shortId, \App\Entity\User $user): ?Task
+    private function findByUuid(string $uuid, User $user): ?Task
     {
-        $all = $this->tasks->findBy(['user' => $user]);
-        $matches = array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $shortId),
-        ));
+        if (!Uuid::isValid($uuid)) {
+            return null;
+        }
+        $task = $this->tasks->find(Uuid::fromString($uuid));
+        if ($task === null || $task->getUser()->getId()->toRfc4122() !== $user->getId()->toRfc4122()) {
+            return null;
+        }
 
-        return count($matches) === 1 ? $matches[0] : null;
+        return $task;
+    }
+
+    private function truncate(string $text, int $max): string
+    {
+        if (mb_strlen($text) <= $max) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, $max) . '…';
     }
 }

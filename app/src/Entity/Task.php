@@ -260,6 +260,14 @@ class Task
         return $this;
     }
 
+    public function reactivate(): self
+    {
+        $this->status = TaskStatus::PENDING;
+        $this->snoozedUntil = null;
+
+        return $this;
+    }
+
     /** @return Collection<int, TaskContext> */
     public function getContexts(): Collection
     {

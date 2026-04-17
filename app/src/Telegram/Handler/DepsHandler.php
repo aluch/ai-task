@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
+use App\Exception\TaskIdException;
 use App\Repository\TaskRepository;
+use App\Service\TaskIdResolver;
 use App\Service\TelegramUserResolver;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
@@ -18,6 +20,7 @@ class DepsHandler
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
+        private readonly TaskIdResolver $idResolver,
     ) {
     }
 
@@ -26,32 +29,39 @@ class DepsHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        $shortId = trim(substr($text, 6)); // strip "/deps "
-        if ($shortId === '') {
+        $arg = trim(substr($text, 6)); // strip "/deps"
+        if ($arg === '') {
             $this->showInteractive($bot, $user);
 
             return;
         }
 
-        $this->showDeps($bot, $user, $shortId, editMessage: false);
+        try {
+            $task = $this->idResolver->resolve($arg, $user);
+        } catch (TaskIdException $e) {
+            $bot->sendMessage(text: $e->getMessage());
+
+            return;
+        }
+
+        $bot->sendMessage(text: $this->formatDeps($task));
     }
 
-    public function showDeps(Nutgram $bot, \App\Entity\User $user, string $shortId, bool $editMessage): void
+    public function showDepsById(Nutgram $bot, \App\Entity\User $user, string $uuidOrPrefix, bool $editMessage): void
     {
-        $matches = $this->findByShortId($shortId, $user);
-        if ($matches === []) {
-            $this->reply($bot, "Задача {$shortId}… не найдена.", $editMessage);
+        try {
+            $task = $this->idResolver->resolve($uuidOrPrefix, $user);
+        } catch (TaskIdException $e) {
+            $this->reply($bot, $e->getMessage(), $editMessage);
 
             return;
         }
 
-        if (count($matches) > 1) {
-            $this->reply($bot, 'ID неоднозначен, уточни (больше символов).', $editMessage);
+        $this->reply($bot, $this->formatDeps($task), $editMessage);
+    }
 
-            return;
-        }
-
-        $task = $matches[0];
+    private function formatDeps(Task $task): string
+    {
         $lines = ["📋 {$task->getTitle()}", ''];
 
         $blockers = $task->getBlockedBy()->toArray();
@@ -60,8 +70,8 @@ class DepsHandler
             $lines[] = '  (ничего)';
         } else {
             foreach ($blockers as $b) {
-                $sid = substr($b->getId()->toRfc4122(), 0, 8);
-                $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$sid}";
+                $uuid = $b->getId()->toRfc4122();
+                $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$uuid}";
             }
         }
 
@@ -73,12 +83,12 @@ class DepsHandler
             $lines[] = '  (ничего)';
         } else {
             foreach ($blocked as $b) {
-                $sid = substr($b->getId()->toRfc4122(), 0, 8);
-                $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$sid}";
+                $uuid = $b->getId()->toRfc4122();
+                $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$uuid}";
             }
         }
 
-        $this->reply($bot, implode("\n", $lines), $editMessage);
+        return implode("\n", $lines);
     }
 
     private function showInteractive(Nutgram $bot, \App\Entity\User $user): void
@@ -97,13 +107,10 @@ class DepsHandler
             if ($shown >= self::MAX_BUTTONS) {
                 break;
             }
-            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
-            $label = mb_substr($task->getTitle(), 0, 30);
-            if (mb_strlen($task->getTitle()) > 30) {
-                $label .= '…';
-            }
+            $uuid = $task->getId()->toRfc4122();
+            $label = $this->truncate($task->getTitle(), 30);
             $keyboard->addRow(
-                InlineKeyboardButton::make(text: $label, callback_data: "deps:{$shortId}"),
+                InlineKeyboardButton::make(text: $label, callback_data: "deps:{$uuid}"),
             );
             $shown++;
         }
@@ -114,6 +121,15 @@ class DepsHandler
         );
     }
 
+    private function truncate(string $text, int $max): string
+    {
+        if (mb_strlen($text) <= $max) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, $max) . '…';
+    }
+
     private function reply(Nutgram $bot, string $text, bool $edit): void
     {
         if ($edit) {
@@ -121,18 +137,5 @@ class DepsHandler
         } else {
             $bot->sendMessage(text: $text);
         }
-    }
-
-    /**
-     * @return Task[]
-     */
-    private function findByShortId(string $prefix, \App\Entity\User $user): array
-    {
-        $all = $this->tasks->findBy(['user' => $user]);
-
-        return array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $prefix),
-        ));
     }
 }

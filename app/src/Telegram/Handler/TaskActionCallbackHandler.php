@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
-use App\Enum\TaskStatus;
 use App\Repository\TaskRepository;
 use App\Service\RelativeTimeParser;
 use App\Service\TelegramUserResolver;
-use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
+use Symfony\Component\Uid\Uuid;
 
 class TaskActionCallbackHandler
 {
@@ -24,7 +26,7 @@ class TaskActionCallbackHandler
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
-        private readonly EntityManagerInterface $em,
+        private readonly ManagerRegistry $doctrine,
         private readonly RelativeTimeParser $timeParser,
     ) {
     }
@@ -47,11 +49,11 @@ class TaskActionCallbackHandler
         };
     }
 
-    private function handleDone(Nutgram $bot, \App\Entity\User $user, string $shortId): void
+    private function handleDone(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findOne($shortId, $user);
+        $task = $this->findByUuid($uuid, $user);
         if ($task === null) {
-            $bot->editMessageText(text: "Задача {$shortId}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
@@ -64,7 +66,7 @@ class TaskActionCallbackHandler
         }
 
         $task->markDone();
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
 
@@ -79,8 +81,7 @@ class TaskActionCallbackHandler
             $lines[] = '';
             $lines[] = '🔓 Разблокирована:';
             foreach ($unblocked as $t) {
-                $sid = substr($t->getId()->toRfc4122(), 0, 8);
-                $lines[] = "  • {$t->getTitle()} — {$sid}";
+                $lines[] = "  • {$t->getTitle()}";
             }
         }
 
@@ -101,32 +102,29 @@ class TaskActionCallbackHandler
         }
     }
 
-    private function snoozeStep1(Nutgram $bot, \App\Entity\User $user, string $shortId): void
+    private function snoozeStep1(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findOne($shortId, $user);
+        $task = $this->findByUuid($uuid, $user);
         if ($task === null) {
-            $bot->editMessageText(text: "Задача {$shortId}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
 
-        $keyboard = \SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup::make();
+        $keyboard = InlineKeyboardMarkup::make();
 
         $presets = [
-            ['30 мин', "snz:s2:{$shortId}:30m"],
-            ['1 час', "snz:s2:{$shortId}:1h"],
-            ['3 часа', "snz:s2:{$shortId}:3h"],
-            ['Завтра 9:00', "snz:s2:{$shortId}:tom9"],
-            ['Завтра 18:00', "snz:s2:{$shortId}:tom18"],
-            ['Через неделю', "snz:s2:{$shortId}:1w"],
+            ['30 мин', "snz:s2:{$uuid}:30m"],
+            ['1 час', "snz:s2:{$uuid}:1h"],
+            ['3 часа', "snz:s2:{$uuid}:3h"],
+            ['Завтра 9:00', "snz:s2:{$uuid}:tom9"],
+            ['Завтра 18:00', "snz:s2:{$uuid}:tom18"],
+            ['Через неделю', "snz:s2:{$uuid}:1w"],
         ];
 
         foreach ($presets as [$label, $cbData]) {
             $keyboard->addRow(
-                \SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton::make(
-                    text: $label,
-                    callback_data: $cbData,
-                ),
+                InlineKeyboardButton::make(text: $label, callback_data: $cbData),
             );
         }
 
@@ -137,11 +135,11 @@ class TaskActionCallbackHandler
         );
     }
 
-    private function snoozeStep2(Nutgram $bot, \App\Entity\User $user, string $shortId, string $preset): void
+    private function snoozeStep2(Nutgram $bot, \App\Entity\User $user, string $uuid, string $preset): void
     {
-        $task = $this->findOne($shortId, $user);
+        $task = $this->findByUuid($uuid, $user);
         if ($task === null) {
-            $bot->editMessageText(text: "Задача {$shortId}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
@@ -153,19 +151,19 @@ class TaskActionCallbackHandler
             'tom9' => (new \DateTimeImmutable('tomorrow 09:00', $userTz))->setTimezone($utc),
             'tom18' => (new \DateTimeImmutable('tomorrow 18:00', $userTz))->setTimezone($utc),
             default => $this->timeParser->parse(
-                self::SNOOZE_PRESETS[$preset] ?? "+1 hours",
+                self::SNOOZE_PRESETS[$preset] ?? '+1 hours',
                 $userTz,
             ),
         };
 
         if ($until === null) {
-            $bot->editMessageText(text: 'Не удалось рассчитать время.');
+            $bot->editMessageText(text: 'Не удалось рассчитать время.', reply_markup: null);
 
             return;
         }
 
         $task->snooze($until);
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
 
         $localUntil = $until->setTimezone($userTz);
         $bot->editMessageText(
@@ -174,11 +172,11 @@ class TaskActionCallbackHandler
         );
     }
 
-    private function handleDeps(Nutgram $bot, \App\Entity\User $user, string $shortId): void
+    private function handleDeps(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findOne($shortId, $user);
+        $task = $this->findByUuid($uuid, $user);
         if ($task === null) {
-            $bot->editMessageText(text: "Задача {$shortId}… не найдена.");
+            $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
@@ -191,7 +189,7 @@ class TaskActionCallbackHandler
             $lines[] = '  (ничего)';
         } else {
             foreach ($blockers as $b) {
-                $sid = substr($b->getId()->toRfc4122(), 0, 8);
+                $sid = $b->getId()->toRfc4122();
                 $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$sid}";
             }
         }
@@ -204,7 +202,7 @@ class TaskActionCallbackHandler
             $lines[] = '  (ничего)';
         } else {
             foreach ($blocked as $b) {
-                $sid = substr($b->getId()->toRfc4122(), 0, 8);
+                $sid = $b->getId()->toRfc4122();
                 $lines[] = "  • {$b->getTitle()} ({$b->getStatus()->value}) — {$sid}";
             }
         }
@@ -212,14 +210,19 @@ class TaskActionCallbackHandler
         $bot->editMessageText(text: implode("\n", $lines), reply_markup: null);
     }
 
-    private function findOne(string $shortId, \App\Entity\User $user): ?Task
+    private function findByUuid(string $uuid, \App\Entity\User $user): ?Task
     {
-        $all = $this->tasks->findBy(['user' => $user]);
-        $matches = array_values(array_filter(
-            $all,
-            fn (Task $t) => str_starts_with($t->getId()->toRfc4122(), $shortId),
-        ));
+        if (!Uuid::isValid($uuid)) {
+            return null;
+        }
+        $task = $this->tasks->find(Uuid::fromString($uuid));
+        if ($task === null) {
+            return null;
+        }
+        if ($task->getUser()->getId()->toRfc4122() !== $user->getId()->toRfc4122()) {
+            return null;
+        }
 
-        return count($matches) === 1 ? $matches[0] : null;
+        return $task;
     }
 }

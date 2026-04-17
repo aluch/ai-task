@@ -73,7 +73,6 @@ class ListHandler
     {
         $title = $task->getTitle();
         $priEmoji = self::PRIORITY_EMOJI[$task->getPriority()->value] ?? '';
-        $shortId = substr($task->getId()->toRfc4122(), 0, 8);
 
         $deadlineStr = '';
         if ($task->getDeadline() !== null) {
@@ -88,7 +87,7 @@ class ListHandler
         $blockedStr = $task->isBlocked() ? ' ⛔' : '';
         $priStr = $priEmoji !== '' ? " {$priEmoji}" : '';
 
-        return "{$num}. {$title}{$deadlineStr}{$priStr}{$statusStr}{$blockedStr}\n   ID: {$shortId}";
+        return "{$num}. {$title}{$deadlineStr}{$priStr}{$statusStr}{$blockedStr}";
     }
 
     private function formatDeadline(\DateTimeImmutable $deadline, \DateTimeZone $userTz): string
