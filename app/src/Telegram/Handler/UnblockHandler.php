@@ -69,8 +69,21 @@ class UnblockHandler
             return;
         }
 
+        $em = $this->doctrine->getManager();
+        if (!$em->contains($blocked)) {
+            $blocked = $em->find(\App\Entity\Task::class, $blocked->getId());
+        }
+        if (!$em->contains($blocker)) {
+            $blocker = $em->find(\App\Entity\Task::class, $blocker->getId());
+        }
+        if ($blocked === null || $blocker === null) {
+            $this->reply($bot, 'Одна из задач недоступна, попробуй ещё раз.', $editMessage);
+
+            return;
+        }
+
         $blocked->removeBlocker($blocker);
-        $this->doctrine->getManager()->flush();
+        $em->flush();
 
         $this->reply(
             $bot,

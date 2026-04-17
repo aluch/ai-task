@@ -71,8 +71,18 @@ class SnoozeHandler
             return;
         }
 
+        $em = $this->doctrine->getManager();
+        if (!$em->contains($task)) {
+            $task = $em->find(\App\Entity\Task::class, $task->getId());
+            if ($task === null) {
+                $bot->sendMessage(text: 'Задача не найдена.');
+
+                return;
+            }
+        }
+
         $task->snooze($until);
-        $this->doctrine->getManager()->flush();
+        $em->flush();
 
         $localUntil = $until->setTimezone($userTz);
         $bot->sendMessage(

@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
-use App\Repository\TaskRepository;
 use App\Service\RelativeTimeParser;
 use App\Service\TelegramUserResolver;
 use Doctrine\Persistence\ManagerRegistry;
+use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
@@ -25,9 +25,9 @@ class TaskActionCallbackHandler
 
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
-        private readonly TaskRepository $tasks,
         private readonly ManagerRegistry $doctrine,
         private readonly RelativeTimeParser $timeParser,
+        private readonly LoggerInterface $logger,
     ) {
     }
 
@@ -51,12 +51,19 @@ class TaskActionCallbackHandler
 
     private function handleDone(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findByUuid($uuid, $user);
+        $em = $this->doctrine->getManager();
+        $task = $this->findByUuidFresh($em, $uuid, $user);
         if ($task === null) {
+            $this->logger->warning('DoneCallback: task not found', ['uuid' => $uuid]);
             $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
             return;
         }
+
+        $this->logger->info('DoneCallback: marking done', [
+            'task_id' => $task->getId()->toRfc4122(),
+            'status_before' => $task->getStatus()->value,
+        ]);
 
         $wasBlockingBefore = [];
         foreach ($task->getBlockedTasks() as $downstream) {
@@ -66,7 +73,13 @@ class TaskActionCallbackHandler
         }
 
         $task->markDone();
-        $this->doctrine->getManager()->flush();
+        $em->flush();
+
+        $this->logger->info('DoneCallback: flushed', [
+            'task_id' => $task->getId()->toRfc4122(),
+            'status_after' => $task->getStatus()->value,
+            'completed_at' => $task->getCompletedAt()?->format('c'),
+        ]);
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
 
@@ -104,7 +117,8 @@ class TaskActionCallbackHandler
 
     private function snoozeStep1(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findByUuid($uuid, $user);
+        $em = $this->doctrine->getManager();
+        $task = $this->findByUuidFresh($em, $uuid, $user);
         if ($task === null) {
             $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
@@ -137,7 +151,8 @@ class TaskActionCallbackHandler
 
     private function snoozeStep2(Nutgram $bot, \App\Entity\User $user, string $uuid, string $preset): void
     {
-        $task = $this->findByUuid($uuid, $user);
+        $em = $this->doctrine->getManager();
+        $task = $this->findByUuidFresh($em, $uuid, $user);
         if ($task === null) {
             $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
@@ -162,8 +177,13 @@ class TaskActionCallbackHandler
             return;
         }
 
+        $this->logger->info('SnoozeCallback: snoozing', [
+            'task_id' => $task->getId()->toRfc4122(),
+            'until_utc' => $until->format('c'),
+        ]);
+
         $task->snooze($until);
-        $this->doctrine->getManager()->flush();
+        $em->flush();
 
         $localUntil = $until->setTimezone($userTz);
         $bot->editMessageText(
@@ -174,7 +194,8 @@ class TaskActionCallbackHandler
 
     private function handleDeps(Nutgram $bot, \App\Entity\User $user, string $uuid): void
     {
-        $task = $this->findByUuid($uuid, $user);
+        $em = $this->doctrine->getManager();
+        $task = $this->findByUuidFresh($em, $uuid, $user);
         if ($task === null) {
             $bot->editMessageText(text: 'Задача не найдена.', reply_markup: null);
 
@@ -210,16 +231,23 @@ class TaskActionCallbackHandler
         $bot->editMessageText(text: implode("\n", $lines), reply_markup: null);
     }
 
-    private function findByUuid(string $uuid, \App\Entity\User $user): ?Task
-    {
+    /**
+     * Получаем repo ИЗ текущего EM (не через DI-инжект), чтобы сущность
+     * попала в identity map ТОГО ЖЕ EM, куда потом идёт flush. После
+     * resetManager() DI-инжектнутый TaskRepository держит stale EM
+     * reference — находит сущность в старом EM, а наш flush по новому
+     * не пишет ничего. Это корень бага с «выполнил но не сохранил».
+     */
+    private function findByUuidFresh(
+        \Doctrine\ORM\EntityManagerInterface $em,
+        string $uuid,
+        \App\Entity\User $user,
+    ): ?Task {
         if (!Uuid::isValid($uuid)) {
             return null;
         }
-        $task = $this->tasks->find(Uuid::fromString($uuid));
-        if ($task === null) {
-            return null;
-        }
-        if ($task->getUser()->getId()->toRfc4122() !== $user->getId()->toRfc4122()) {
+        $task = $em->getRepository(Task::class)->find(Uuid::fromString($uuid));
+        if ($task === null || !$task->getUser()->getId()->equals($user->getId())) {
             return null;
         }
 

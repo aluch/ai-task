@@ -5,23 +5,30 @@ declare(strict_types=1);
 namespace App\Service;
 
 use App\Entity\User;
-use App\Repository\UserRepository;
-use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use SergiX44\Nutgram\Nutgram;
 
+/**
+ * Find-or-create User по telegram_id.
+ *
+ * Использует ManagerRegistry (не EntityManagerInterface): в долгоживущем
+ * bot-процессе после resetManager() прямая ссылка на EM становится stale.
+ * getManager() всегда отдаёт живой EM. См. правило в CLAUDE.md.
+ */
 class TelegramUserResolver
 {
     public function __construct(
-        private readonly EntityManagerInterface $em,
-        private readonly UserRepository $users,
+        private readonly ManagerRegistry $doctrine,
     ) {
     }
 
     public function resolve(Nutgram $bot): User
     {
-        $telegramId = (string) $bot->userId();
+        $em = $this->doctrine->getManager();
+        $users = $em->getRepository(User::class);
 
-        $user = $this->users->findByTelegramId($telegramId);
+        $telegramId = (string) $bot->userId();
+        $user = $users->findOneBy(['telegramId' => $telegramId]);
 
         if ($user !== null) {
             $this->updateNameIfEmpty($user, $bot);
@@ -33,8 +40,8 @@ class TelegramUserResolver
         $user->setTelegramId($telegramId);
         $user->setName($this->extractName($bot));
 
-        $this->em->persist($user);
-        $this->em->flush();
+        $em->persist($user);
+        $em->flush();
 
         return $user;
     }
@@ -51,7 +58,7 @@ class TelegramUserResolver
         }
 
         $user->setName($name);
-        $this->em->flush();
+        $this->doctrine->getManager()->flush();
     }
 
     private function extractName(Nutgram $bot): ?string

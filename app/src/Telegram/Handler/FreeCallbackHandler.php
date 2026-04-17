@@ -69,7 +69,11 @@ class FreeCallbackHandler
      */
     private function handleTake(Nutgram $bot, array $state, string $shortKey): void
     {
+        // Берём repo из текущего EM (не DI-инжект $this->tasks) — иначе после
+        // resetManager() сущности попадают в stale EM, а flush по новому EM
+        // молча ничего не пишет.
         $em = $this->doctrine->getManager();
+        $repo = $em->getRepository(\App\Entity\Task::class);
         $taskIds = $state['task_ids'] ?? [];
 
         $count = 0;
@@ -77,16 +81,21 @@ class FreeCallbackHandler
             if (!Uuid::isValid($idStr)) {
                 continue;
             }
-            $task = $this->tasks->find(Uuid::fromString($idStr));
+            $task = $repo->find(Uuid::fromString($idStr));
             if ($task === null) {
                 continue;
             }
             if ($task->getStatus() === TaskStatus::PENDING) {
+                $this->logger->info('FreeTake: marking IN_PROGRESS', [
+                    'task_id' => $task->getId()->toRfc4122(),
+                ]);
                 $task->setStatus(TaskStatus::IN_PROGRESS);
                 $count++;
             }
         }
         $em->flush();
+
+        $this->logger->info('FreeTake: flushed', ['taken' => $count]);
 
         $this->store->delete($shortKey);
 

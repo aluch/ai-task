@@ -64,6 +64,19 @@ class DoneHandler
 
     private function markDoneTask(Nutgram $bot, Task $task, bool $editMessage): void
     {
+        $em = $this->doctrine->getManager();
+
+        // Если task пришёл из stale EM — подмерджим в текущий, чтобы flush
+        // действительно записал изменения.
+        if (!$em->contains($task)) {
+            $task = $em->find(Task::class, $task->getId());
+            if ($task === null) {
+                $this->reply($bot, 'Задача не найдена.', $editMessage);
+
+                return;
+            }
+        }
+
         $wasBlockingBefore = [];
         foreach ($task->getBlockedTasks() as $downstream) {
             if ($downstream->isBlocked()) {
@@ -72,7 +85,7 @@ class DoneHandler
         }
 
         $task->markDone();
-        $this->doctrine->getManager()->flush();
+        $em->flush();
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
 
