@@ -9,6 +9,7 @@ use App\Telegram\Handler\DependencyCallbackHandler;
 use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
 use App\Telegram\Handler\FreeTextHandler;
+use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
 use App\Telegram\Handler\SnoozeHandler;
@@ -31,6 +32,7 @@ class HandlerRegistry
         private readonly UnblockHandler $unblockHandler,
         private readonly DepsHandler $depsHandler,
         private readonly DependencyCallbackHandler $depCallbackHandler,
+        private readonly TaskActionCallbackHandler $taskActionCallbackHandler,
         private readonly FreeTextHandler $freeTextHandler,
         private readonly LoggerInterface $logger,
     ) {
@@ -58,8 +60,11 @@ class HandlerRegistry
         $bot->onCommand('deps', $this->depsHandler);
         $bot->onCommand('deps {args}', $this->depsHandler);
 
-        // Callback queries для интерактивных зависимостей
+        // Callback queries
         $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
+        $bot->onCallbackQueryData('done:{data}', $this->taskActionCallbackHandler);
+        $bot->onCallbackQueryData('snz:{data}', $this->taskActionCallbackHandler);
+        $bot->onCallbackQueryData('deps:{data}', $this->taskActionCallbackHandler);
 
         $freeTextHandler = $this->freeTextHandler;
         $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {

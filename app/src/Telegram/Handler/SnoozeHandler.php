@@ -10,9 +10,13 @@ use App\Service\RelativeTimeParser;
 use App\Service\TelegramUserResolver;
 use Doctrine\ORM\EntityManagerInterface;
 use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
 
 class SnoozeHandler
 {
+    private const MAX_BUTTONS = 8;
+
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
@@ -26,17 +30,25 @@ class SnoozeHandler
         $user = $this->userResolver->resolve($bot);
         $text = $bot->message()?->text ?? '';
 
-        // /snooze <id> <when>
-        $args = trim(substr($text, 8)); // strip "/snooze "
-        $spacePos = strpos($args, ' ');
-        if ($args === '' || $spacePos === false) {
-            $bot->sendMessage(text: "Использование: /snooze <id> <когда>\nПримеры: /snooze 019d9289 +2h\n/snooze 019d9289 tomorrow 09:00");
+        $cmdArgs = trim(substr($text, 8)); // strip "/snooze "
+        $spacePos = strpos($cmdArgs, ' ');
+
+        if ($cmdArgs === '' || $spacePos === false) {
+            if ($cmdArgs !== '' && $spacePos === false) {
+                // Только ID без времени
+                $bot->sendMessage(text: "Использование: /snooze <id> <когда>\nИли /snooze без аргументов для интерактивного выбора.");
+
+                return;
+            }
+
+            $this->showInteractive($bot, $user);
 
             return;
         }
 
-        $shortId = substr($args, 0, $spacePos);
-        $rawUntil = trim(substr($args, $spacePos + 1));
+        // С аргументами — старый режим
+        $shortId = substr($cmdArgs, 0, $spacePos);
+        $rawUntil = trim(substr($cmdArgs, $spacePos + 1));
 
         $matches = $this->findByShortId($shortId, $user);
 
@@ -74,6 +86,39 @@ class SnoozeHandler
         $localUntil = $until->setTimezone($userTz);
         $bot->sendMessage(
             text: "💤 Задача отложена: {$task->getTitle()}\nДо: {$localUntil->format('d.m H:i')} ({$user->getTimezone()})",
+        );
+    }
+
+    private function showInteractive(Nutgram $bot, \App\Entity\User $user): void
+    {
+        $tasks = $this->tasks->findForUser($user, limit: self::MAX_BUTTONS + 1);
+
+        if ($tasks === []) {
+            $bot->sendMessage(text: 'Нет открытых задач.');
+
+            return;
+        }
+
+        $keyboard = InlineKeyboardMarkup::make();
+        $shown = 0;
+        foreach ($tasks as $task) {
+            if ($shown >= self::MAX_BUTTONS) {
+                break;
+            }
+            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
+            $label = mb_substr($task->getTitle(), 0, 30);
+            if (mb_strlen($task->getTitle()) > 30) {
+                $label .= '…';
+            }
+            $keyboard->addRow(
+                InlineKeyboardButton::make(text: $label, callback_data: "snz:s1:{$shortId}"),
+            );
+            $shown++;
+        }
+
+        $bot->sendMessage(
+            text: 'Какую задачу отложить?',
+            reply_markup: $keyboard,
         );
     }
 

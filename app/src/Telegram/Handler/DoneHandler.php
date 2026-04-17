@@ -9,9 +9,13 @@ use App\Repository\TaskRepository;
 use App\Service\TelegramUserResolver;
 use Doctrine\ORM\EntityManagerInterface;
 use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
+use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardMarkup;
 
 class DoneHandler
 {
+    private const MAX_BUTTONS = 8;
+
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
@@ -26,15 +30,20 @@ class DoneHandler
 
         $shortId = trim(substr($text, 6)); // strip "/done "
         if ($shortId === '') {
-            $bot->sendMessage(text: "Использование: /done <id>\nID — первые 8 символов UUID из /list.");
+            $this->showInteractive($bot, $user);
 
             return;
         }
 
+        $this->markDone($bot, $user, $shortId, editMessage: false);
+    }
+
+    public function markDone(Nutgram $bot, \App\Entity\User $user, string $shortId, bool $editMessage): void
+    {
         $matches = $this->findByShortId($shortId, $user);
 
         if ($matches === []) {
-            $bot->sendMessage(text: "Задача с ID {$shortId}… не найдена среди твоих задач.");
+            $this->reply($bot, "Задача с ID {$shortId}… не найдена среди твоих задач.", $editMessage);
 
             return;
         }
@@ -46,14 +55,13 @@ class DoneHandler
             }
             $lines[] = '';
             $lines[] = 'Уточни ID (больше символов).';
-            $bot->sendMessage(text: implode("\n", $lines));
+            $this->reply($bot, implode("\n", $lines), $editMessage);
 
             return;
         }
 
         $task = $matches[0];
 
-        // Запомним задачи, которые были заблокированы до выполнения
         $wasBlockingBefore = [];
         foreach ($task->getBlockedTasks() as $downstream) {
             if ($downstream->isBlocked()) {
@@ -66,9 +74,8 @@ class DoneHandler
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
 
-        // Проверяем какие задачи разблокировались
         $unblocked = [];
-        foreach ($wasBlockingBefore as $id => $downstream) {
+        foreach ($wasBlockingBefore as $downstream) {
             if (!$downstream->isBlocked()) {
                 $unblocked[] = $downstream;
             }
@@ -83,7 +90,49 @@ class DoneHandler
             }
         }
 
-        $bot->sendMessage(text: implode("\n", $lines));
+        $this->reply($bot, implode("\n", $lines), $editMessage);
+    }
+
+    private function showInteractive(Nutgram $bot, \App\Entity\User $user): void
+    {
+        $tasks = $this->tasks->findUnblockedForUser($user);
+
+        if ($tasks === []) {
+            $bot->sendMessage(text: 'Нет открытых задач.');
+
+            return;
+        }
+
+        $keyboard = InlineKeyboardMarkup::make();
+        $shown = 0;
+        foreach ($tasks as $task) {
+            if ($shown >= self::MAX_BUTTONS) {
+                break;
+            }
+            $shortId = substr($task->getId()->toRfc4122(), 0, 8);
+            $label = mb_substr($task->getTitle(), 0, 30);
+            if (mb_strlen($task->getTitle()) > 30) {
+                $label .= '…';
+            }
+            $keyboard->addRow(
+                InlineKeyboardButton::make(text: $label, callback_data: "done:{$shortId}"),
+            );
+            $shown++;
+        }
+
+        $bot->sendMessage(
+            text: 'Какую задачу выполнил?',
+            reply_markup: $keyboard,
+        );
+    }
+
+    private function reply(Nutgram $bot, string $text, bool $edit): void
+    {
+        if ($edit) {
+            $bot->editMessageText(text: $text, reply_markup: null);
+        } else {
+            $bot->sendMessage(text: $text);
+        }
     }
 
     /**
