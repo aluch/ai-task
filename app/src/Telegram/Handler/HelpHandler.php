@@ -16,7 +16,8 @@ class HelpHandler
 
             /start — приветствие и регистрация
             /help — эта справка
-            /list — открытые задачи
+            /list — открытые задачи (PENDING + IN_PROGRESS). Фильтры:
+              /list все | /list done | /list snoozed
             /done — пометить задачу выполненной (интерактивно или /done <id>)
             /snooze — отложить задачу (интерактивно или /snooze <id> <когда>)
             /block — добавить зависимость (интерактивно или /block <task> <blocker>)

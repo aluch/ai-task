@@ -27,18 +27,31 @@ class ListHandler
     ) {
     }
 
-    public function __invoke(Nutgram $bot): void
+    public function __invoke(Nutgram $bot, ?string $args = null): void
     {
         $user = $this->userResolver->resolve($bot);
         $userTz = new \DateTimeZone($user->getTimezone());
 
-        $tasks = $this->tasks->findForUser($user, limit: self::LIMIT + 1);
+        $text = $bot->message()?->text ?? '';
+        $filterArg = trim(substr($text, 5)); // strip "/list"
+        [$statuses, $filterLabel] = $this->resolveFilter($filterArg);
+
+        if ($statuses === 'invalid') {
+            $bot->sendMessage(text: "Не понял фильтр «{$filterArg}».\nДоступно: /list, /list все, /list done, /list snoozed");
+
+            return;
+        }
+
+        $tasks = $this->tasks->findForUser($user, $statuses, limit: self::LIMIT + 1);
 
         $hasMore = count($tasks) > self::LIMIT;
         $tasks = array_slice($tasks, 0, self::LIMIT);
 
         if ($tasks === []) {
-            $bot->sendMessage(text: 'Нет открытых задач. Отправь текст — создам новую.');
+            $emptyMsg = $filterLabel === null
+                ? 'Нет открытых задач. Отправь текст — создам новую.'
+                : "Нет задач по фильтру «{$filterLabel}».";
+            $bot->sendMessage(text: $emptyMsg);
 
             return;
         }
@@ -57,6 +70,10 @@ class ListHandler
         $sorted = array_merge($unblocked, $blocked);
 
         $lines = [];
+        if ($filterLabel !== null) {
+            $lines[] = "📋 Фильтр: {$filterLabel}";
+            $lines[] = '';
+        }
         foreach ($sorted as $i => $task) {
             $lines[] = $this->formatTask($i + 1, $task, $userTz);
         }
@@ -129,5 +146,28 @@ class ListHandler
         }
 
         return 'дней';
+    }
+
+    /**
+     * Разбирает аргумент /list в (statuses, label).
+     * - '' → (null, null) — дефолт, активные без заголовка
+     * - 'все' | 'all' → ([], 'все статусы')
+     * - 'done' | 'выполнено' → ([DONE], 'выполненные')
+     * - 'snoozed' | 'отложенные' → ([SNOOZED], 'отложенные')
+     * - неизвестное → ('invalid', null)
+     *
+     * @return array{0: TaskStatus[]|null|'invalid', 1: ?string}
+     */
+    private function resolveFilter(string $arg): array
+    {
+        $normalized = mb_strtolower(trim($arg));
+
+        return match ($normalized) {
+            '' => [null, null],
+            'все', 'all' => [[], 'все статусы'],
+            'done', 'выполнено', 'выполненные' => [[TaskStatus::DONE], 'выполненные'],
+            'snoozed', 'отложенные', 'отложено' => [[TaskStatus::SNOOZED], 'отложенные'],
+            default => ['invalid', null],
+        };
     }
 }

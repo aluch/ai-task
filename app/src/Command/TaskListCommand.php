@@ -64,7 +64,8 @@ class TaskListCommand extends Command
         }
 
         $limit = (int) $input->getOption('limit');
-        $tasks = $this->tasks->findForUser($user, $status, $limit);
+        $statuses = $status !== null ? [$status] : null;
+        $tasks = $this->tasks->findForUser($user, $statuses, $limit);
 
         if ($tasks === []) {
             $io->writeln('<comment>No tasks.</comment>');

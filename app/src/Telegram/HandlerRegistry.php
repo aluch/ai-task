@@ -49,6 +49,7 @@ class HandlerRegistry
         $bot->onCommand('start', $this->startHandler);
         $bot->onCommand('help', $this->helpHandler);
         $bot->onCommand('list', $this->listHandler);
+        $bot->onCommand('list {args}', $this->listHandler);
 
         // Команды с аргументами: регистрируем и голый вариант (показать usage),
         // и вариант с {args} (реальная обработка). onCommand('done') матчит
