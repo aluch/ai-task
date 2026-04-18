@@ -135,7 +135,17 @@ class FreeHandler
 
         for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
             try {
-                return $this->advisor->suggest($user, $minutes, $context, $tasks, $now, $excludeIds);
+                $dto = $this->advisor->suggest($user, $minutes, $context, $tasks, $now, $excludeIds);
+
+                $this->logger->info('TaskAdvisor reasoning', [
+                    'user_id' => $user->getId()->toRfc4122(),
+                    'available_minutes' => $minutes,
+                    'context' => $context,
+                    'suggestions_count' => count($dto->suggestions),
+                    'internal_reasoning' => $dto->internalReasoning,
+                ]);
+
+                return $dto;
             } catch (ClaudeRateLimitException $e) {
                 if ($attempt >= 1) {
                     break;
@@ -283,9 +293,9 @@ class FreeHandler
 
         $lines[] = "⏱ Итого: ~{$this->formatMinutes($dto->totalEstimatedMinutes)} из {$this->formatMinutes($minutes)} доступных";
 
-        if ($dto->reasoning !== null) {
+        if ($dto->userSummary !== null) {
             $lines[] = '';
-            $lines[] = "💭 {$dto->reasoning}";
+            $lines[] = "💭 {$dto->userSummary}";
         }
 
         return implode("\n", $lines);

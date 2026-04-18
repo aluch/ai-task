@@ -94,7 +94,8 @@ class TaskAdvisor
         Отвечай строго JSON без markdown-обёрток, без пояснений, без preamble. Только JSON-объект:
 
         {
-          "reasoning": "Почему выбрал именно эти задачи в этом порядке",
+          "user_summary": "Короткое дружеское объяснение для пользователя — 1-3 предложения, разговорный тон, по-русски. БЕЗ перечисления отвергнутых задач. БЕЗ нумерации пунктов.",
+          "internal_reasoning": "Подробный анализ для логов: что выбрано и почему, что отвергнуто и по каким причинам, дилеммы, сомнения. Пользователь это НЕ видит.",
           "suggestions": [
             {
               "task_id": "019d9774-...",
@@ -109,6 +110,17 @@ class TaskAdvisor
 
         Если ни одна задача не подходит — suggestions: [] и no_match_reason с объяснением.
 
+        Про разделение user_summary и internal_reasoning:
+
+        - user_summary — то, что увидит пользователь под списком. Человек хочет знать «что и почему выбрано», а не «что не вошло». Разговорно, живо, ≤ 300 символов.
+          ✅ «Взял срочные outdoor-задачи — корм и штаны можно совместить в один выход.»
+          ✅ «Дедлайн по билетам завтра, так что в первую очередь они. Остальное быстрое, должен успеть.»
+          ❌ «Выбрал 2 задачи. Отверг дачные (пользователь дома), видеокурс (не влезает в 2 часа), компостер (низкий приоритет)...»
+          ❌ «1) Важно потому что... 2) Потом потому что...» (не нумеровать)
+          НЕ упоминай отвергнутые. НЕ перечисляй критерии явно. Это ОДНА живая реплика.
+
+        - internal_reasoning — для логов/отладки. Можешь подробно: каждую задачу взвесил, отвергнутые с причинами, сомнения. Пользователь этого не читает.
+
         Правила подбора:
 
         1. Приоритет и срочность. Задачи с приближающимся дедлайном (ближайшие 24-48 часов) и высоким priority — в первую очередь. urgent или is_overdue=true — почти всегда должна попасть в предложение (если контекст подходит).
@@ -117,7 +129,7 @@ class TaskAdvisor
 
         3. Контекст места. Если «дома» — не предлагай задачи с контекстами outdoor, at_dacha, at_office. Если «на улице» — не предлагай задачи, требующие концентрации или стационарного интернета (focused обычно не ок на улице). Если контекст не указан — предлагай любые.
 
-        4. Группировка по месту/маршруту. Если несколько задач можно выполнить за один выход (соседние места, по пути) — предложи их вместе и скажи об этом в reasoning и tip. Ищи совпадения в description (адреса, «рядом», «по пути», «заодно»).
+        4. Группировка по месту/маршруту. Если несколько задач можно выполнить за один выход (соседние места, по пути) — предложи их вместе и скажи об этом в user_summary и tip. Ищи совпадения в description (адреса, «рядом», «по пути», «заодно»).
 
         5. Зависимости. Заблокированные задачи в списке не должно быть. Если вдруг попадёт — игнорируй.
 
@@ -127,7 +139,7 @@ class TaskAdvisor
 
         8. Пустой результат. Если ни одна задача не подходит — пустой suggestions и объяснение в no_match_reason: «все задачи требуют выхода из дома, а ты дома», «у тебя 30 минут, но все задачи длиннее часа».
 
-        9. Переполнение. Если задач подходит больше чем влезает — выбери самые важные, а в reasoning упомяни сколько ещё подходит но не влезло.
+        9. Переполнение. Если задач подходит больше чем влезает — выбери самые важные. Упомяни сколько ещё подходит но не влезло — в internal_reasoning подробно, в user_summary максимум одной фразой.
         PROMPT;
     }
 
@@ -177,8 +189,9 @@ class TaskAdvisor
             );
         }
 
-        $reasoning = isset($json['reasoning']) && is_string($json['reasoning']) && $json['reasoning'] !== ''
-            ? $json['reasoning']
+        $userSummary = $this->extractUserSummary($json);
+        $internalReasoning = isset($json['internal_reasoning']) && is_string($json['internal_reasoning']) && $json['internal_reasoning'] !== ''
+            ? $json['internal_reasoning']
             : null;
 
         $noMatchReason = isset($json['no_match_reason']) && is_string($json['no_match_reason']) && $json['no_match_reason'] !== ''
@@ -250,15 +263,36 @@ class TaskAdvisor
         $this->logger->info('TaskAdvisor: suggestion', [
             'count' => count($suggestions),
             'total_minutes' => $totalMinutes,
-            'reasoning' => $reasoning,
+            'user_summary' => $userSummary,
+            'internal_reasoning' => $internalReasoning,
         ]);
 
         return new TaskSuggestionDTO(
             suggestions: $suggestions,
-            reasoning: $reasoning,
+            userSummary: $userSummary,
+            internalReasoning: $internalReasoning,
             totalEstimatedMinutes: $totalMinutes,
             noMatchReason: $suggestions === [] ? ($noMatchReason ?? 'AI не нашёл подходящих задач.') : null,
         );
+    }
+
+    private function extractUserSummary(array $json): ?string
+    {
+        $raw = $json['user_summary'] ?? null;
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        if (mb_strlen($raw) > 300) {
+            $this->logger->warning('AI did not comply with summary length limit', [
+                'length' => mb_strlen($raw),
+                'summary' => mb_substr($raw, 0, 100) . '…',
+            ]);
+
+            return mb_substr($raw, 0, 299) . '…';
+        }
+
+        return $raw;
     }
 
     private function extractJson(string $text): ?array
