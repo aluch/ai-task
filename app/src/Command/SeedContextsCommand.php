@@ -15,20 +15,21 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 #[AsCommand(
     name: 'app:seed:contexts',
-    description: 'Seed the base set of TaskContext rows (idempotent)',
+    description: 'Seed or update the base set of TaskContext rows (idempotent)',
 )]
 class SeedContextsCommand extends Command
 {
+    /** @var array<array{0: string, 1: string, 2: ?string}> */
     private const CONTEXTS = [
-        ['at_home', 'Дома'],
-        ['outdoor', 'На улице / в дороге'],
-        ['at_dacha', 'На даче'],
-        ['at_office', 'На работе / в офисе'],
-        ['needs_internet', 'Нужен интернет'],
-        ['needs_phone_call', 'Требует звонка'],
-        ['quick', 'Короткая (до 15 минут)'],
-        ['focused', 'Требует концентрации'],
-        ['with_kids_ok', 'Можно делать с детьми'],
+        ['at_home', 'Дома', null],
+        ['outdoor', 'На улице / в дороге', null],
+        ['at_dacha', 'На даче', null],
+        ['at_office', 'На работе / в офисе', null],
+        ['needs_internet', 'Нужен интернет', null],
+        ['needs_phone_call', 'Требует звонка', null],
+        ['quick', 'Короткая (до 15 минут)', null],
+        ['focused', 'Требует концентрации', null],
+        ['with_kids_ok', 'Можно делать с детьми', null],
     ];
 
     public function __construct(
@@ -43,25 +44,43 @@ class SeedContextsCommand extends Command
         $io = new SymfonyStyle($input, $output);
 
         $created = 0;
-        $skipped = 0;
+        $updated = 0;
+        $unchanged = 0;
 
-        foreach (self::CONTEXTS as [$code, $label]) {
-            if ($this->contexts->findByCode($code) !== null) {
-                ++$skipped;
+        foreach (self::CONTEXTS as [$code, $label, $description]) {
+            $existing = $this->contexts->findByCode($code);
+
+            if ($existing === null) {
+                $this->em->persist(new TaskContext($code, $label, $description));
+                ++$created;
                 continue;
             }
 
-            $this->em->persist(new TaskContext($code, $label));
-            ++$created;
+            $changed = false;
+            if ($existing->getLabel() !== $label) {
+                $existing->setLabel($label);
+                $changed = true;
+            }
+            if ($existing->getDescription() !== $description) {
+                $existing->setDescription($description);
+                $changed = true;
+            }
+
+            if ($changed) {
+                ++$updated;
+            } else {
+                ++$unchanged;
+            }
         }
 
         $this->em->flush();
 
-        if ($created === 0) {
-            $io->success(sprintf('%d contexts already exist, skipped.', $skipped));
-        } else {
-            $io->success(sprintf('Created %d contexts (%d already existed).', $created, $skipped));
-        }
+        $io->success(sprintf(
+            'Contexts: %d created, %d updated, %d unchanged.',
+            $created,
+            $updated,
+            $unchanged,
+        ));
 
         return Command::SUCCESS;
     }

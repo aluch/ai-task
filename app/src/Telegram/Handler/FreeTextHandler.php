@@ -148,8 +148,12 @@ class FreeTextHandler
             }
         }
 
-        if ($dto->contextCodes !== []) {
-            $lines[] = '🏷 ' . implode(', ', $dto->contextCodes);
+        if (!$task->getContexts()->isEmpty()) {
+            $labels = array_map(
+                fn (\App\Entity\TaskContext $c) => $c->getLabel(),
+                $task->getContexts()->toArray(),
+            );
+            $lines[] = '🏷 ' . implode(', ', $labels);
         }
 
         if ($dto->parserNotes !== null) {
