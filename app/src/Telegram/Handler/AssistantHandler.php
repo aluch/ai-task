@@ -5,15 +5,18 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\AI\Assistant;
+use App\Service\MarkdownToTelegramHtml;
 use App\Service\TelegramUserResolver;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Properties\ParseMode;
 
 class AssistantHandler
 {
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly Assistant $assistant,
+        private readonly MarkdownToTelegramHtml $markdown,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -44,7 +47,8 @@ class AssistantHandler
                 'tools_called' => $result->toolsCalled,
             ]);
 
-            $this->editOrSend($bot, $chatId, $messageId, $result->replyText);
+            $html = $this->markdown->convert($result->replyText);
+            $this->editOrSend($bot, $chatId, $messageId, $html);
         } catch (\Throwable $e) {
             $this->logger->error('Assistant failed', [
                 'error' => $e->getMessage(),
@@ -59,12 +63,17 @@ class AssistantHandler
         }
     }
 
-    private function editOrSend(Nutgram $bot, int $chatId, ?int $messageId, string $text): void
+    private function editOrSend(Nutgram $bot, int $chatId, ?int $messageId, string $html): void
     {
         if ($messageId !== null) {
-            $bot->editMessageText(text: $text, chat_id: $chatId, message_id: $messageId);
+            $bot->editMessageText(
+                text: $html,
+                chat_id: $chatId,
+                message_id: $messageId,
+                parse_mode: ParseMode::HTML,
+            );
         } else {
-            $bot->sendMessage(text: $text);
+            $bot->sendMessage(text: $html, parse_mode: ParseMode::HTML);
         }
     }
 }

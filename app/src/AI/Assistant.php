@@ -73,10 +73,14 @@ class Assistant
                 );
             }
 
-            // Добавляем assistant-сообщение целиком (включая tool_use блоки) в историю
+            // Добавляем assistant-сообщение целиком (включая tool_use блоки) в историю.
+            // Нормализуем tool_use.input — если Claude вернул [] или null (бывает когда
+            // у tool нет обязательных параметров, или когда вызывается без аргументов),
+            // при эхо назад API 400-тит с «Input should be a valid dictionary».
+            // Пустой массив в PHP сериализуется как [], объект — как {}.
             $messages[] = [
                 'role' => 'assistant',
-                'content' => $contentBlocks,
+                'content' => $this->normalizeToolUseInputs($contentBlocks),
             ];
 
             // Исполняем все tool_use блоки
@@ -127,6 +131,26 @@ class Assistant
             outputTokens: $totalOutputTokens,
             iterations: $iterations,
         );
+    }
+
+    /**
+     * Для всех tool_use блоков гарантирует, что input сериализуется как JSON-объект,
+     * а не как массив: Claude может вернуть input=[] (пустой массив) или null,
+     * Anthropic API требует dict. Пустой stdClass → {} при json_encode.
+     */
+    private function normalizeToolUseInputs(array $blocks): array
+    {
+        foreach ($blocks as &$block) {
+            if (($block['type'] ?? '') !== 'tool_use') {
+                continue;
+            }
+            $input = $block['input'] ?? null;
+            if (!is_array($input) || $input === [] || array_is_list($input)) {
+                $block['input'] = new \stdClass();
+            }
+        }
+
+        return $blocks;
     }
 
     private function extractTextFromBlocks(array $blocks): string

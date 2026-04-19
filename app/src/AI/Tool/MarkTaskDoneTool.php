@@ -50,6 +50,22 @@ class MarkTaskDoneTool implements AssistantTool
         ];
     }
 
+    /**
+     * Примитивный морфо-стемминг: отрезаем 2 последних символа если слово >3.
+     * «тренировку» → «тренировк» → находит «тренировка», «тренировки», etc.
+     * Для короткого MVP достаточно; полноценную морфологию добавим если
+     * окажется что этого мало.
+     */
+    private function toSearchRoot(string $query): string
+    {
+        $normalized = mb_strtolower(trim($query));
+        if (mb_strlen($normalized) > 3) {
+            $normalized = mb_substr($normalized, 0, -2);
+        }
+
+        return $normalized;
+    }
+
     public function execute(User $user, array $input): ToolResult
     {
         $em = $this->doctrine->getManager();
@@ -69,15 +85,25 @@ class MarkTaskDoneTool implements AssistantTool
                 return ToolResult::error('Задача по UUID не найдена.');
             }
         } elseif ($taskQuery !== '') {
+            $searchRoot = $this->toSearchRoot($taskQuery);
             $matches = $repo->createQueryBuilder('t')
                 ->andWhere('t.user = :user')
                 ->andWhere('LOWER(t.title) LIKE :q')
                 ->andWhere('t.status IN (:open)')
                 ->setParameter('user', $user)
-                ->setParameter('q', '%' . mb_strtolower($taskQuery) . '%')
+                ->setParameter('q', '%' . $searchRoot . '%')
                 ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS, TaskStatus::SNOOZED])
                 ->getQuery()
                 ->getResult();
+
+            $this->logger->info('mark_task_done search', [
+                'query' => $taskQuery,
+                'search_root' => $searchRoot,
+                'found' => array_map(fn ($t) => [
+                    'id' => $t->getId()->toRfc4122(),
+                    'title' => $t->getTitle(),
+                ], $matches),
+            ]);
 
             if ($matches === []) {
                 return ToolResult::error("Не нашёл задачу с «{$taskQuery}» в названии.");
