@@ -7,6 +7,7 @@ namespace App\Telegram\Handler;
 use App\AI\Assistant;
 use App\Service\MarkdownToTelegramHtml;
 use App\Service\TelegramUserResolver;
+use App\Telegram\SearchDispatcher;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Properties\ParseMode;
@@ -17,6 +18,7 @@ class AssistantHandler
         private readonly TelegramUserResolver $userResolver,
         private readonly Assistant $assistant,
         private readonly MarkdownToTelegramHtml $markdown,
+        private readonly SearchDispatcher $searchDispatcher,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -27,6 +29,12 @@ class AssistantHandler
         $text = trim($bot->message()?->text ?? '');
 
         if ($text === '') {
+            return;
+        }
+
+        // Если пользователь в режиме поиска по меню (кнопка 🔍 Поиск),
+        // текущий текст — это поисковый запрос, а не обычное сообщение.
+        if ($this->searchDispatcher->dispatchIfWaiting($bot, $user, $text)) {
             return;
         }
 

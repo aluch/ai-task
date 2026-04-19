@@ -91,9 +91,39 @@
 Все команды с аргументами поддерживают два режима: с аргументами (CLI/автоматизация) и без (интерактивный через inline-кнопки). При вызове без аргументов бот отправляет сообщение со списком задач как кнопками, пользователь нажимает — бот редактирует сообщение (editMessageText) на результат.
 
 Callback handler'ы:
-- `DependencyCallbackHandler` — `dep:s1:*`, `dep:s2:*:*`, `dep:u1:*`, `dep:u2:*:*` (block/unblock flow)
-- `TaskActionCallbackHandler` — `done:*` (mark done), `snz:s1:*`/`snz:s2:*:*` (snooze flow), `deps:*` (show deps)
+- `DependencyCallbackHandler` — `dep:s1:*`, `dep:s2:*:*`, `dep:u1:*`, `dep:u2:*:*` (block/unblock flow) + menu controls `dep:s1:m:*`, `dep:u1:m:*`
+- `TaskActionCallbackHandler` — `done:*` (mark done), `snz:s1:*`/`snz:s2:*:*` (snooze flow), `deps:*` (show deps) + menu controls `done:m:*`, `snz:m:*`, `deps:m:*`
+- `ListCallbackHandler` — `list:p:*`, `list:close:*` (пагинация /list)
 - `FreeCallbackHandler` — `free:<key>:take|reroll|dismiss`. State хранится в Redis (`free:<12hex>`, TTL 1 час) — в callback_data не помещаются UUID задач. Лимит rerolls: 3 подряд. См. `docs/architecture/task-advisor.md`.
+
+## Пагинация
+
+Все списки задач (команда `/list` + inline-меню выбора в `/done`/`/snooze`/`/block`/`/unblock`/`/deps`) поддерживают пагинацию через inline-кнопки.
+
+**Размер страницы:**
+- `/list` (текстовый вывод) — 10 задач
+- inline-меню выбора — 5 задач (помещается на экран без скролла)
+
+**Управляющие кнопки в меню выбора:**
+- `← Назад` / `Стр. N/M` / `Далее →` — если больше одной страницы
+- `🔍 Поиск по названию` — опционально, включено везде кроме `/list`
+- `✖ Закрыть` — всегда
+
+**State в Redis** через `App\Service\PaginationStore`:
+- Ключ `page:<12hex>`, TTL 1 час
+- Хранит: `user_id`, `action` (`done`/`snooze`/`deps`/`block`/`unblock`/`list`), `filter` (search, statuses), `total`
+- Сами task_id НЕ хранятся — на каждую страницу свежий SQL с LIMIT+OFFSET (меньше рассинхрона если между страницами кто-то пометил задачу)
+
+**Callback_data протокол:**
+- Select task: `done:<uuid>`, `snz:s1:<uuid>`, `deps:<uuid>`, `dep:s1:<uuid>`, `dep:u1:<uuid>` (не меняется Paginator'ом, формирует caller)
+- Menu controls: `<menuPrefix>:p:<key>:<page>` / `<menuPrefix>:search:<key>` / `<menuPrefix>:close:<key>` / `<menuPrefix>:noop:<key>`
+- menuPrefix per flow: `done:m`, `snz:m`, `deps:m`, `dep:s1:m`, `dep:u1:m`, `list`
+
+**Сортировка** в `TaskRepository::findForUserPaginated`: приоритет (urgent→high→medium→low через HIDDEN CASE) → дедлайн ASC с nulls last → createdAt ASC. Самые важные сверху.
+
+**Поиск по названию.** Кнопка `🔍` в меню записывает в Redis `waiting_search:<telegram_id>` → sessionKey (TTL 2 мин). Следующий текстовый ввод пользователя перехватывается `AssistantHandler` → `SearchDispatcher`: читаем session, узнаём action, открываем первую страницу нужного меню с `search=<query>`. Стемминг (режем последние 2 символа у слов >3) покрывает падежи.
+
+**Сортировка** и **поиск** через один `buildPaginationQuery()` — одни фильтры, одна сортировка, consistent результат между count и страницами.
 
 Ограничения:
 - Максимум 8 кнопок (без пагинации), самые свежие задачи

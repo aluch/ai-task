@@ -5,14 +5,17 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
+use App\Entity\User;
 use App\Enum\TaskStatus;
 use App\Repository\TaskRepository;
+use App\Service\PaginationStore;
 use App\Service\TelegramUserResolver;
+use App\Telegram\Paginator;
 use SergiX44\Nutgram\Nutgram;
 
 class ListHandler
 {
-    private const LIMIT = 10;
+    public const PAGE_SIZE = 10;
 
     private const PRIORITY_EMOJI = [
         'urgent' => '🔴',
@@ -24,13 +27,14 @@ class ListHandler
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
         private readonly TaskRepository $tasks,
+        private readonly PaginationStore $paginationStore,
+        private readonly Paginator $paginator,
     ) {
     }
 
     public function __invoke(Nutgram $bot, ?string $args = null): void
     {
         $user = $this->userResolver->resolve($bot);
-        $userTz = new \DateTimeZone($user->getTimezone());
 
         $text = $bot->message()?->text ?? '';
         $filterArg = trim(substr($text, 5)); // strip "/list"
@@ -42,48 +46,91 @@ class ListHandler
             return;
         }
 
-        $tasks = $this->tasks->findForUser($user, $statuses, limit: self::LIMIT + 1);
+        $this->renderFirstPage($bot, $user, $statuses, $filterLabel);
+    }
 
-        $hasMore = count($tasks) > self::LIMIT;
-        $tasks = array_slice($tasks, 0, self::LIMIT);
+    /**
+     * @param TaskStatus[]|null $statuses
+     */
+    public function renderFirstPage(
+        Nutgram $bot,
+        User $user,
+        ?array $statuses,
+        ?string $filterLabel,
+        ?int $editMessageId = null,
+    ): void {
+        $total = $this->tasks->countForUser($user, $statuses);
 
-        if ($tasks === []) {
+        if ($total === 0) {
             $emptyMsg = $filterLabel === null
                 ? 'Нет открытых задач. Отправь текст — создам новую.'
                 : "Нет задач по фильтру «{$filterLabel}».";
-            $bot->sendMessage(text: $emptyMsg);
+            if ($editMessageId !== null) {
+                $bot->editMessageText(text: $emptyMsg, message_id: $editMessageId, reply_markup: null);
+            } else {
+                $bot->sendMessage(text: $emptyMsg);
+            }
 
             return;
         }
 
-        // Разделяем: незаблокированные вверху, заблокированные внизу
-        $unblocked = [];
-        $blocked = [];
-        foreach ($tasks as $task) {
-            if ($task->isBlocked()) {
-                $blocked[] = $task;
-            } else {
-                $unblocked[] = $task;
-            }
-        }
+        $sessionKey = $this->paginationStore->create(
+            userId: $user->getId()->toRfc4122(),
+            action: 'list',
+            filter: ['statuses' => array_map(fn (TaskStatus $s) => $s->value, $statuses ?? TaskRepository::ACTIVE_STATUSES), 'filter_label' => $filterLabel],
+            total: $total,
+        );
 
-        $sorted = array_merge($unblocked, $blocked);
+        $this->renderPage($bot, $user, $sessionKey, $statuses, $filterLabel, 1, $total, $editMessageId);
+    }
 
-        $lines = [];
+    /**
+     * @param TaskStatus[]|null $statuses
+     */
+    public function renderPage(
+        Nutgram $bot,
+        User $user,
+        string $sessionKey,
+        ?array $statuses,
+        ?string $filterLabel,
+        int $page,
+        int $total,
+        ?int $editMessageId = null,
+    ): void {
+        $totalPages = (int) ceil($total / self::PAGE_SIZE);
+        $page = max(1, min($page, $totalPages));
+        $offset = ($page - 1) * self::PAGE_SIZE;
+
+        $tasks = $this->tasks->findForUserPaginated($user, $statuses, self::PAGE_SIZE, $offset);
+
+        $userTz = new \DateTimeZone($user->getTimezone());
+
+        $headerParts = [];
         if ($filterLabel !== null) {
-            $lines[] = "📋 Фильтр: {$filterLabel}";
-            $lines[] = '';
+            $headerParts[] = "📋 Фильтр: {$filterLabel}";
+        } else {
+            $headerParts[] = "📋 Твои задачи ({$total})";
         }
-        foreach ($sorted as $i => $task) {
-            $lines[] = $this->formatTask($i + 1, $task, $userTz);
+        $lines = [implode("\n", $headerParts), ''];
+
+        foreach ($tasks as $i => $task) {
+            $num = $offset + $i + 1;
+            $lines[] = $this->formatTask($num, $task, $userTz);
         }
 
-        if ($hasMore) {
+        if ($totalPages > 1) {
             $lines[] = '';
-            $lines[] = '…показаны первые ' . self::LIMIT . '. Закрой часть через /done чтобы увидеть остальные.';
+            $lines[] = "Страница {$page}/{$totalPages}";
         }
 
-        $bot->sendMessage(text: implode("\n", $lines));
+        $keyboard = $this->paginator->buildListKeyboard($sessionKey, $page, $totalPages);
+
+        $text = implode("\n", $lines);
+        if ($editMessageId !== null) {
+            $bot->editMessageText(text: $text, message_id: $editMessageId, reply_markup: $keyboard);
+        } else {
+            $bot->sendMessage(text: $text, reply_markup: $keyboard);
+        }
     }
 
     private function formatTask(int $num, Task $task, \DateTimeZone $userTz): string
@@ -149,13 +196,6 @@ class ListHandler
     }
 
     /**
-     * Разбирает аргумент /list в (statuses, label).
-     * - '' → (null, null) — дефолт, активные без заголовка
-     * - 'все' | 'all' → ([], 'все статусы')
-     * - 'done' | 'выполнено' → ([DONE], 'выполненные')
-     * - 'snoozed' | 'отложенные' → ([SNOOZED], 'отложенные')
-     * - неизвестное → ('invalid', null)
-     *
      * @return array{0: TaskStatus[]|null|'invalid', 1: ?string}
      */
     private function resolveFilter(string $arg): array

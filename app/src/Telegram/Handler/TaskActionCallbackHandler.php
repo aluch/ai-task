@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\Task;
+use App\Entity\User;
+use App\Service\PaginationStore;
 use App\Service\RelativeTimeParser;
 use App\Service\TelegramUserResolver;
 use Doctrine\Persistence\ManagerRegistry;
@@ -28,6 +30,10 @@ class TaskActionCallbackHandler
         private readonly ManagerRegistry $doctrine,
         private readonly RelativeTimeParser $timeParser,
         private readonly LoggerInterface $logger,
+        private readonly PaginationStore $paginationStore,
+        private readonly DoneHandler $doneHandler,
+        private readonly SnoozeHandler $snoozeHandler,
+        private readonly DepsHandler $depsHandler,
     ) {
     }
 
@@ -40,6 +46,14 @@ class TaskActionCallbackHandler
 
         $parts = explode(':', $data);
         $prefix = $parts[0] ?? '';
+        $second = $parts[1] ?? '';
+
+        // Menu controls: <prefix>:m:<action>:<key>[:<page>]
+        if ($second === 'm') {
+            $this->handleMenu($bot, $user, $prefix, $parts);
+
+            return;
+        }
 
         match ($prefix) {
             'done' => $this->handleDone($bot, $user, $parts[1] ?? ''),
@@ -49,7 +63,67 @@ class TaskActionCallbackHandler
         };
     }
 
-    private function handleDone(Nutgram $bot, \App\Entity\User $user, string $uuid): void
+    /**
+     * @param string[] $parts
+     */
+    private function handleMenu(Nutgram $bot, User $user, string $prefix, array $parts): void
+    {
+        $menuAction = $parts[2] ?? '';
+        $sessionKey = $parts[3] ?? '';
+        $messageId = $bot->callbackQuery()?->message?->message_id;
+
+        if ($menuAction === 'noop') {
+            return;
+        }
+
+        $session = $this->paginationStore->get($sessionKey);
+        if ($session === null) {
+            $bot->editMessageText(
+                text: '⏰ Сессия устарела, используй команду заново.',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        if ($user->getId()->toRfc4122() !== ($session['user_id'] ?? null)) {
+            return;
+        }
+
+        if ($menuAction === 'close') {
+            $bot->editMessageText(text: 'Список закрыт.', reply_markup: null);
+            $this->paginationStore->delete($sessionKey);
+
+            return;
+        }
+
+        if ($menuAction === 'search') {
+            $this->paginationStore->setWaitingSearch((string) $bot->userId(), $sessionKey);
+            $bot->editMessageText(
+                text: '🔍 Напиши часть названия задачи, которую ищешь:',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        if ($menuAction !== 'p') {
+            return;
+        }
+
+        $page = (int) ($parts[4] ?? 1);
+        $search = (string) ($session['filter']['search'] ?? '');
+        $total = (int) ($session['total'] ?? 0);
+
+        match ($prefix) {
+            'done' => $this->doneHandler->renderPage($bot, $user, $sessionKey, $search, $page, $total, $messageId),
+            'snz' => $this->snoozeHandler->renderPage($bot, $user, $sessionKey, $search, $page, $total, $messageId),
+            'deps' => $this->depsHandler->renderPage($bot, $user, $sessionKey, $search, $page, $total, $messageId),
+            default => null,
+        };
+    }
+
+    private function handleDone(Nutgram $bot, User $user, string $uuid): void
     {
         $em = $this->doctrine->getManager();
         $task = $this->findByUuidFresh($em, $uuid, $user);
@@ -78,7 +152,6 @@ class TaskActionCallbackHandler
         $this->logger->info('DoneCallback: flushed', [
             'task_id' => $task->getId()->toRfc4122(),
             'status_after' => $task->getStatus()->value,
-            'completed_at' => $task->getCompletedAt()?->format('c'),
         ]);
 
         $lines = ["✅ Задача выполнена: {$task->getTitle()}"];
@@ -104,7 +177,7 @@ class TaskActionCallbackHandler
     /**
      * @param string[] $parts
      */
-    private function handleSnooze(Nutgram $bot, \App\Entity\User $user, array $parts): void
+    private function handleSnooze(Nutgram $bot, User $user, array $parts): void
     {
         $step = $parts[1] ?? '';
 
@@ -115,7 +188,7 @@ class TaskActionCallbackHandler
         }
     }
 
-    private function snoozeStep1(Nutgram $bot, \App\Entity\User $user, string $uuid): void
+    private function snoozeStep1(Nutgram $bot, User $user, string $uuid): void
     {
         $em = $this->doctrine->getManager();
         $task = $this->findByUuidFresh($em, $uuid, $user);
@@ -149,7 +222,7 @@ class TaskActionCallbackHandler
         );
     }
 
-    private function snoozeStep2(Nutgram $bot, \App\Entity\User $user, string $uuid, string $preset): void
+    private function snoozeStep2(Nutgram $bot, User $user, string $uuid, string $preset): void
     {
         $em = $this->doctrine->getManager();
         $task = $this->findByUuidFresh($em, $uuid, $user);
@@ -192,7 +265,7 @@ class TaskActionCallbackHandler
         );
     }
 
-    private function handleDeps(Nutgram $bot, \App\Entity\User $user, string $uuid): void
+    private function handleDeps(Nutgram $bot, User $user, string $uuid): void
     {
         $em = $this->doctrine->getManager();
         $task = $this->findByUuidFresh($em, $uuid, $user);
@@ -231,17 +304,10 @@ class TaskActionCallbackHandler
         $bot->editMessageText(text: implode("\n", $lines), reply_markup: null);
     }
 
-    /**
-     * Получаем repo ИЗ текущего EM (не через DI-инжект), чтобы сущность
-     * попала в identity map ТОГО ЖЕ EM, куда потом идёт flush. После
-     * resetManager() DI-инжектнутый TaskRepository держит stale EM
-     * reference — находит сущность в старом EM, а наш flush по новому
-     * не пишет ничего. Это корень бага с «выполнил но не сохранил».
-     */
     private function findByUuidFresh(
         \Doctrine\ORM\EntityManagerInterface $em,
         string $uuid,
-        \App\Entity\User $user,
+        User $user,
     ): ?Task {
         if (!Uuid::isValid($uuid)) {
             return null;

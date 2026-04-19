@@ -194,6 +194,9 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `App\Telegram\Middleware\WhitelistMiddleware` — фильтр по `TELEGRAM_ALLOWED_USER_IDS`.
 - `App\Service\TelegramUserResolver` — find-or-create User по telegram_id.
 - `App\Service\RelativeTimeParser` — парсинг относительных и абсолютных форматов времени. Используется и в CLI (`TaskSnoozeCommand`), и в боте (`SnoozeHandler`).
+- `App\Service\PaginationStore` — Redis-хранилище состояний пагинации (state для inline-меню с листанием + waiting_search для кнопки 🔍 Поиск). TTL сессии 1 час, TTL waiting_search 2 минуты.
+- `App\Telegram\Paginator` — сборка клавиатур пагинации (task picker с «← Назад / Стр. N/M / Далее → / 🔍 Поиск / ✖ Закрыть» + list-keyboard только с навигацией).
+- `App\Telegram\SearchDispatcher` — роутинг поискового текста (после 🔍) в нужный handler по action'у сохранённой сессии.
 
 ### Команды бота
 

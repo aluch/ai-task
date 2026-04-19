@@ -12,6 +12,7 @@ use App\Telegram\Handler\AssistantHandler;
 use App\Telegram\Handler\FreeCallbackHandler;
 use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\FreeTextHandler;
+use App\Telegram\Handler\ListCallbackHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
@@ -40,6 +41,7 @@ class HandlerRegistry
         private readonly FreeCallbackHandler $freeCallbackHandler,
         private readonly FreeTextHandler $freeTextHandler,
         private readonly AssistantHandler $assistantHandler,
+        private readonly ListCallbackHandler $listCallbackHandler,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -75,6 +77,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('snz:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('deps:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('free:{data}', $this->freeCallbackHandler);
+        $bot->onCallbackQueryData('list:{data}', $this->listCallbackHandler);
 
         // Свободный текст теперь идёт в Assistant (tool calling). FreeTextHandler
         // оставлен в коде как быстрый откат — если assistant начнёт сбоить,

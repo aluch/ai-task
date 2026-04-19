@@ -8,6 +8,7 @@ use App\Entity\Task;
 use App\Entity\User;
 use App\Repository\TaskRepository;
 use App\Service\DependencyStateStore;
+use App\Service\PaginationStore;
 use App\Service\TelegramUserResolver;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
@@ -35,6 +36,7 @@ class DependencyCallbackHandler
         private readonly BlockHandler $blockHandler,
         private readonly UnblockHandler $unblockHandler,
         private readonly DependencyStateStore $stateStore,
+        private readonly PaginationStore $paginationStore,
     ) {
     }
 
@@ -52,6 +54,15 @@ class DependencyCallbackHandler
 
         $step = $parts[1];
 
+        // Menu controls (pagination для списка задач на step1):
+        //   dep:s1:m:p:<key>:<page>   → пагинация block-step1
+        //   dep:u1:m:...              → unblock-step1
+        if (in_array($step, ['s1', 'u1'], true) && ($parts[2] ?? '') === 'm') {
+            $this->handleMenu($bot, $user, $step, $parts);
+
+            return;
+        }
+
         match ($step) {
             's1' => $this->handleBlockStep1($bot, $user, $parts[2]),
             's2' => $this->handleBlockStep2($bot, $user, $parts[2], $parts[3] ?? ''),
@@ -59,6 +70,65 @@ class DependencyCallbackHandler
             'u2' => $this->handleUnblockStep2($bot, $user, $parts[2], $parts[3] ?? ''),
             default => null,
         };
+    }
+
+    /**
+     * @param string[] $parts
+     */
+    private function handleMenu(Nutgram $bot, User $user, string $flow, array $parts): void
+    {
+        $menuAction = $parts[3] ?? '';
+        $sessionKey = $parts[4] ?? '';
+        $messageId = $bot->callbackQuery()?->message?->message_id;
+
+        if ($menuAction === 'noop') {
+            return;
+        }
+
+        $session = $this->paginationStore->get($sessionKey);
+        if ($session === null) {
+            $bot->editMessageText(
+                text: '⏰ Сессия устарела, используй команду заново.',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        if ($user->getId()->toRfc4122() !== ($session['user_id'] ?? null)) {
+            return;
+        }
+
+        if ($menuAction === 'close') {
+            $bot->editMessageText(text: 'Список закрыт.', reply_markup: null);
+            $this->paginationStore->delete($sessionKey);
+
+            return;
+        }
+
+        if ($menuAction === 'search') {
+            $this->paginationStore->setWaitingSearch((string) $bot->userId(), $sessionKey);
+            $bot->editMessageText(
+                text: '🔍 Напиши часть названия задачи, которую ищешь:',
+                reply_markup: null,
+            );
+
+            return;
+        }
+
+        if ($menuAction !== 'p') {
+            return;
+        }
+
+        $page = (int) ($parts[5] ?? 1);
+        $search = (string) ($session['filter']['search'] ?? '');
+        $total = (int) ($session['total'] ?? 0);
+
+        if ($flow === 's1') {
+            $this->blockHandler->renderPage($bot, $user, $sessionKey, $search, $page, $total, $messageId);
+        } else {
+            $this->unblockHandler->renderPage($bot, $user, $sessionKey, $search, $page, $total, $messageId);
+        }
     }
 
     private function handleBlockStep1(Nutgram $bot, User $user, string $blockedUuid): void
