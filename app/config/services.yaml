@@ -12,6 +12,7 @@ parameters:
     anthropic.api_key: '%env(ANTHROPIC_API_KEY)%'
     anthropic.model_parser: '%env(ANTHROPIC_MODEL_PARSER)%'
     anthropic.model_advisor: '%env(ANTHROPIC_MODEL_ADVISOR)%'
+    anthropic.model_assistant: '%env(ANTHROPIC_MODEL_ASSISTANT)%'
     redis.url: '%env(REDIS_URL)%'
 
 services:
@@ -46,6 +47,20 @@ services:
     App\AI\TaskAdvisor:
         arguments:
             $model: '%anthropic.model_advisor%'
+
+    App\AI\Assistant:
+        arguments:
+            $model: '%anthropic.model_assistant%'
+
+    # Autoconfigure тегом все AssistantTool-реализации,
+    # ToolRegistry собирает их через tagged_iterator.
+    _instanceof:
+        App\AI\Tool\AssistantTool:
+            tags: ['app.assistant_tool']
+
+    App\AI\Tool\ToolRegistry:
+        arguments:
+            $tools: !tagged_iterator app.assistant_tool
 
     App\Service\FreeSuggestionStore:
         arguments:

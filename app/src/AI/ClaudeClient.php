@@ -25,7 +25,9 @@ class ClaudeClient
     }
 
     /**
-     * @param array<array{role: string, content: string}> $messages
+     * @param array<array{role: string, content: string|array}> $messages
+     * @param array|null $tools список tool-деклараций в формате Anthropic API
+     *   (каждая: {name, description, input_schema})
      */
     public function createMessage(
         string $systemPrompt,
@@ -33,6 +35,7 @@ class ClaudeClient
         ?string $model = null,
         int $maxTokens = 1024,
         ?float $temperature = null,
+        ?array $tools = null,
     ): ClaudeResponse {
         $model ??= self::DEFAULT_MODEL;
         $start = microtime(true);
@@ -46,6 +49,10 @@ class ClaudeClient
 
         if ($temperature !== null) {
             $body['temperature'] = $temperature;
+        }
+
+        if ($tools !== null && $tools !== []) {
+            $body['tools'] = $tools;
         }
 
         try {

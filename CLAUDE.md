@@ -225,6 +225,7 @@ bot:
 - `App\AI\ClaudeClient` — обёртка вокруг Symfony HttpClient для Anthropic Messages API. Классифицирует ошибки: `ClaudeClientException` (4xx), `ClaudeTransientException` (5xx/сеть), `ClaudeRateLimitException` (429). Логирует каждый вызов: модель, tokens, elapsed.
 - `App\AI\TaskParser` — превращает свободный текст в `ParsedTaskDTO`. System prompt содержит текущее время пользователя, его timezone и список контекстов из БД. Ответ — JSON, парсится с fallback.
 - `App\AI\TaskAdvisor` — подбирает оптимальный набор задач под свободное время и контекст (для команды `/free`). Отличается от парсера: не извлечение, а рассуждение (приоритеты, маршруты, группировка). Используется Sonnet вместо Haiku. Подробности — `docs/architecture/task-advisor.md`.
+- `App\AI\Assistant` — AI-ассистент через tool calling. Обрабатывает свободный текст в Telegram через `AssistantHandler`, выбирает нужный tool (create_task/list_tasks/mark_task_done/snooze_task) на основе намерения пользователя, исполняет и отвечает по-человечески. Tool use loop до 5 итераций. Подробности — `docs/architecture/assistant.md`.
 - `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
 - `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
 - `App\AI\DTO\TaskSuggestionDTO` + `SuggestedTask` — DTO подборки задач (suggestions, reasoning, totalEstimatedMinutes, noMatchReason).
@@ -237,6 +238,7 @@ bot:
 |---|---|---|
 | Парсинг задач | `claude-haiku-4-5` | `ANTHROPIC_MODEL_PARSER` |
 | Подбор задач (`/free`) | `claude-sonnet-4-6` | `ANTHROPIC_MODEL_ADVISOR` |
+| Ассистент (свободный текст) | `claude-sonnet-4-6` | `ANTHROPIC_MODEL_ASSISTANT` |
 
 Haiku выбрана для парсинга: достаточно умна для структурного извлечения, значительно дешевле и быстрее Opus/Sonnet. Для подбора нужна Sonnet — несколько конкурирующих критериев (приоритет, контекст, маршрут, время) Haiku путает. Переключение через `.env` без передеплоя.
 
@@ -245,6 +247,14 @@ Haiku выбрана для парсинга: достаточно умна дл
 - `ANTHROPIC_API_KEY` — API key от Anthropic (обязателен для AI-функций)
 - `ANTHROPIC_MODEL_PARSER` — модель парсера (default `claude-haiku-4-5`)
 - `ANTHROPIC_MODEL_ADVISOR` — модель advisor'а (default `claude-sonnet-4-6`)
+- `ANTHROPIC_MODEL_ASSISTANT` — модель ассистента (default `claude-sonnet-4-6`)
+
+### Команды vs свободный текст
+
+- **Команды** (`/list`, `/done`, `/free`, `/snooze` и т.д.) — быстрый путь с inline-кнопками или аргументами. Детерминированные, предсказуемые.
+- **Свободный текст** идёт в Assistant, который через tool calling сам решает что сделать (создать задачу, показать список, пометить выполненной, отложить). Для диалогового UX.
+
+Правило: если есть готовая команда под задачу — используем её. Если пользователь пишет человеческим языком — ассистент разбирается.
 
 ## Следующие шаги
 

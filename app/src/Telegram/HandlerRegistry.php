@@ -8,6 +8,7 @@ use App\Telegram\Handler\BlockHandler;
 use App\Telegram\Handler\DependencyCallbackHandler;
 use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
+use App\Telegram\Handler\AssistantHandler;
 use App\Telegram\Handler\FreeCallbackHandler;
 use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\FreeTextHandler;
@@ -38,6 +39,7 @@ class HandlerRegistry
         private readonly FreeHandler $freeHandler,
         private readonly FreeCallbackHandler $freeCallbackHandler,
         private readonly FreeTextHandler $freeTextHandler,
+        private readonly AssistantHandler $assistantHandler,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -74,8 +76,11 @@ class HandlerRegistry
         $bot->onCallbackQueryData('deps:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('free:{data}', $this->freeCallbackHandler);
 
-        $freeTextHandler = $this->freeTextHandler;
-        $bot->fallback(function (Nutgram $bot) use ($freeTextHandler): void {
+        // Свободный текст теперь идёт в Assistant (tool calling). FreeTextHandler
+        // оставлен в коде как быстрый откат — если assistant начнёт сбоить,
+        // достаточно поменять одну строку ниже обратно на $this->freeTextHandler.
+        $assistantHandler = $this->assistantHandler;
+        $bot->fallback(function (Nutgram $bot) use ($assistantHandler): void {
             $text = $bot->message()?->text;
             if ($text === null) {
                 return;
@@ -87,7 +92,7 @@ class HandlerRegistry
                 return;
             }
 
-            ($freeTextHandler)($bot);
+            ($assistantHandler)($bot);
         });
 
         $logger = $this->logger;
