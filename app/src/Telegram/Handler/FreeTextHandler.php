@@ -71,6 +71,14 @@ class FreeTextHandler
         $this->em->persist($task);
         $this->em->flush();
 
+        $this->logger->info('Creating task (FreeText)', [
+            'task_id' => $task->getId()->toRfc4122(),
+            'title' => $task->getTitle(),
+            'deadline' => $task->getDeadline()?->format('c'),
+            'priority' => $task->getPriority()->value,
+            'remind_before_deadline_minutes' => $task->getRemindBeforeDeadlineMinutes(),
+        ]);
+
         $bot->sendMessage(text: $this->formatResponse($task, $dto, $user));
     }
 

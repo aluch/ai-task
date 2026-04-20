@@ -92,9 +92,12 @@ class CreateTaskTool implements AssistantTool
         $em->persist($task);
         $em->flush();
 
-        $this->logger->info('Assistant created task', [
+        $this->logger->info('Creating task (Assistant)', [
             'task_id' => $task->getId()->toRfc4122(),
             'title' => $task->getTitle(),
+            'deadline' => $task->getDeadline()?->format('c'),
+            'priority' => $task->getPriority()->value,
+            'remind_before_deadline_minutes' => $task->getRemindBeforeDeadlineMinutes(),
         ]);
 
         $parts = ["Создана задача: «{$task->getTitle()}»"];

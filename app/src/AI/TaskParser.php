@@ -123,18 +123,30 @@ class TaskParser
            estimated_minutes ≤ 15. Если задача занимает больше — НЕ ставь quick, даже если
            она кажется простой.
 
-        7. Remind_before_deadline_minutes — за сколько минут до дедлайна напомнить. Ставь
-           это поле ТОЛЬКО если выполнены ОБА условия:
-           - У задачи есть deadline (не null)
-           - Priority = high ИЛИ urgent
-           В остальных случаях — null.
-           Рекомендации:
+        7. Remind_before_deadline_minutes — за сколько минут до дедлайна напомнить.
+
+           ГЛАВНОЕ правило: если пользователь ЯВНО просит напомнить («напомни мне»,
+           «напомни за час», «предупреди», «дай знать за 10 минут»), ВСЕГДА ставь это
+           поле — независимо от priority. Это самый частый сценарий, и игнорировать
+           просьбу пользователя нельзя. Извлекай время из запроса:
+           - «за час» / «за 1 час» → 60
+           - «за 10 минут» / «за 10 мин» → 10
+           - «за полчаса» / «за 30 минут» → 30
+           - «за 2 часа» → 120
+           - «за день» / «за сутки» → 1440
+           - «заранее» без числа → 60 по умолчанию
+           deadline при этом должен быть, иначе напоминать не от чего.
+
+           Если пользователь НЕ просил явно, авто-ставь только при deadline + priority
+           ∈ (high, urgent):
            - urgent + дедлайн сегодня → 30
            - high + дедлайн сегодня → 60
            - high + дедлайн завтра или позже → 120
            - urgent + дедлайн завтра или позже → 60
-           - Если estimated_minutes > 60 (задача длинная), увеличь напоминание на estimated_minutes,
-             чтобы пользователь успел начать заранее.
+           - Если estimated_minutes > 60 (задача длинная), увеличь напоминание на
+             estimated_minutes, чтобы пользователь успел начать заранее.
+
+           В остальных случаях — null.
         PROMPT;
     }
 
@@ -189,14 +201,22 @@ class TaskParser
         $remindBefore = null;
         if (isset($json['remind_before_deadline_minutes']) && is_int($json['remind_before_deadline_minutes'])) {
             $candidate = $json['remind_before_deadline_minutes'];
-            // Санитизация: имеет смысл только при наличии deadline и высоком приоритете
-            if ($candidate > 0
-                && $deadline !== null
-                && in_array($priority, [TaskPriority::HIGH, TaskPriority::URGENT], true)
-            ) {
+            // Санитизация: требуется только deadline — приоритет может быть любым,
+            // потому что пользователь мог явно попросить напомнить даже у medium-
+            // задачи («напомни мне за час» про домашку). Правила «без явного запроса
+            // только для high/urgent» — на стороне промпта.
+            if ($candidate > 0 && $deadline !== null) {
                 $remindBefore = $candidate;
             }
         }
+
+        $this->logger->info('TaskParser: parsed task', [
+            'title' => $title,
+            'deadline' => $deadline?->format('c'),
+            'priority' => $priority->value,
+            'remind_before_deadline_minutes' => $remindBefore,
+            'ai_remind_before_raw' => $json['remind_before_deadline_minutes'] ?? null,
+        ]);
 
         return new ParsedTaskDTO(
             title: $title,
