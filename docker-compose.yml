@@ -80,6 +80,14 @@ services:
     restart: on-failure
     stop_grace_period: 35s
 
+  scheduler:
+    <<: *php-service
+    container_name: ai-task-scheduler
+    # --time-limit=3600 — воркер сам завершится через час, Docker
+    # перезапустит. Защита от возможных утечек в long-running процессе.
+    command: php bin/console messenger:consume scheduler_reminders --time-limit=3600 -vv
+    restart: on-failure
+
   adminer:
     image: adminer:latest
     container_name: ai-task-adminer

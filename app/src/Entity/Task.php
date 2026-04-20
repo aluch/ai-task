@@ -69,6 +69,12 @@ class Task
     #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $snoozedUntil = null;
 
+    #[ORM\Column(type: 'integer', nullable: true)]
+    private ?int $remindBeforeDeadlineMinutes = null;
+
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $deadlineReminderSentAt = null;
+
     /** @var Collection<int, TaskContext> */
     #[ORM\ManyToMany(targetEntity: TaskContext::class)]
     #[ORM\JoinTable(name: 'task_context_link')]
@@ -266,6 +272,49 @@ class Task
         $this->snoozedUntil = null;
 
         return $this;
+    }
+
+    public function getRemindBeforeDeadlineMinutes(): ?int
+    {
+        return $this->remindBeforeDeadlineMinutes;
+    }
+
+    public function setRemindBeforeDeadlineMinutes(?int $minutes): self
+    {
+        $this->remindBeforeDeadlineMinutes = $minutes;
+
+        return $this;
+    }
+
+    public function getDeadlineReminderSentAt(): ?\DateTimeImmutable
+    {
+        return $this->deadlineReminderSentAt;
+    }
+
+    public function setDeadlineReminderSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->deadlineReminderSentAt = $at;
+
+        return $this;
+    }
+
+    public function markDeadlineReminderSent(): void
+    {
+        $this->deadlineReminderSentAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+    }
+
+    public function shouldRemindBeforeDeadline(\DateTimeImmutable $now): bool
+    {
+        if ($this->deadline === null || $this->remindBeforeDeadlineMinutes === null) {
+            return false;
+        }
+        if ($this->deadlineReminderSentAt !== null) {
+            return false;
+        }
+
+        $triggerAt = $this->deadline->modify("-{$this->remindBeforeDeadlineMinutes} minutes");
+
+        return $now >= $triggerAt;
     }
 
     /** @return Collection<int, TaskContext> */

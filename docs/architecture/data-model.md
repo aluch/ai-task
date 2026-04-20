@@ -57,6 +57,8 @@ erDiagram
 - **`telegramId`** — `bigint`, `UNIQUE`, `nullable`. На этапе CLI пользователи создаются вручную через `app:user:create`; когда подключим Telegram, поле будет проставляться при первой команде `/start`.
 - **`name`** — display name, `nullable`. Подтянется из Telegram.
 - **`timezone`** — IANA-имя, default `Europe/Tallinn`. Нужно чтобы корректно интерпретировать дедлайны и расписания напоминаний.
+- **`quietStartHour`/`quietEndHour`** — тихие часы в зоне юзера (SMALLINT, default 22→8). Scheduler не шлёт напоминания в этот интервал. Метод `isQuietHoursNow($utcNow)` поддерживает пересечение полуночи.
+- **`lastMessageAt`** — TIMESTAMPTZ nullable, когда юзер последний раз писал боту (UTC). Обновляется в middleware `HandlerRegistry` через `UserActivityTracker::recordMessage`. Метод `isRecentlyActive($utcNow, 5)` — чтобы Scheduler не слал напоминание во время активного диалога.
 - **`createdAt`** — выставляется в `#[PrePersist]` через `CreatedAtTrait`.
 - **`tasks`** — `OneToMany → Task`, `cascade=['persist']`, `orphanRemoval=true`. Удаление пользователя каскадно удалит все его задачи (на стороне БД через `ON DELETE CASCADE`).
 
@@ -76,6 +78,8 @@ erDiagram
 - **`lastRemindedAt`** — когда последний раз напомнили. Используется планировщиком: «отправить, если `now - lastRemindedAt >= reminderIntervalMinutes`».
 - **`completedAt`** — заполняется методом `markDone()` одновременно с переводом в `DONE`.
 - **`snoozedUntil`** — момент, до которого задача «спит». Заполняется методом `snooze(\DateTimeImmutable $until)` одновременно с переводом в `SNOOZED`. Пока `now() < snoozedUntil`, задача скрыта из обычной выборки `findForUser()` (без явного `--status`); с явным `--status=snoozed` показывается всегда. После наступления момента — снова попадает в обычный список.
+- **`remindBeforeDeadlineMinutes`** — INT nullable, за сколько минут до дедлайна прислать напоминание. Ставится AI при парсинге только если есть `deadline` и `priority` ∈ (high, urgent). null = не напоминать. См. `docs/architecture/reminders.md`.
+- **`deadlineReminderSentAt`** — TIMESTAMPTZ nullable, когда уже отправили уведомление (чтобы не слать повторно). Сбрасывается в null при снуз-через-кнопку напоминания — после разбуживания напомнит снова, если дедлайн ещё не прошёл.
 - **`createdAt`/`updatedAt`** — `TimestampableTrait`, лайфсайкл-коллбеки `#[PrePersist]`/`#[PreUpdate]`.
 - **`contexts`** — `ManyToMany → TaskContext`, join-таблица `task_context_link`. Без inverse-стороны: контексты — это словарь, а не aggregate root.
 

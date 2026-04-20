@@ -72,6 +72,9 @@ class CreateTaskTool implements AssistantTool
             $task->setEstimatedMinutes($dto->estimatedMinutes);
         }
         $task->setPriority($dto->priority);
+        if ($dto->remindBeforeDeadlineMinutes !== null) {
+            $task->setRemindBeforeDeadlineMinutes($dto->remindBeforeDeadlineMinutes);
+        }
         $task->setSource(TaskSource::AI_PARSED);
 
         if ($dto->contextCodes !== []) {

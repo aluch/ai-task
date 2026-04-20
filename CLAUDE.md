@@ -33,6 +33,8 @@ Telegram-бот с интеграцией Claude API для управления
 - `make clean` — снести всё включая volumes
 - `make bot-logs` — логи бота (Telegram polling)
 - `make bot-restart` — перезапуск бота
+- `make scheduler-logs` — логи scheduler-воркера (напоминания)
+- `make scheduler-restart` — перезапуск scheduler
 
 Внутри php-контейнера: `composer`, `php bin/console ...` (после установки Symfony).
 
@@ -195,6 +197,11 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `App\Service\TelegramUserResolver` — find-or-create User по telegram_id.
 - `App\Service\RelativeTimeParser` — парсинг относительных и абсолютных форматов времени. Используется и в CLI (`TaskSnoozeCommand`), и в боте (`SnoozeHandler`).
 - `App\Service\PaginationStore` — Redis-хранилище состояний пагинации (state для inline-меню с листанием + waiting_search для кнопки 🔍 Поиск). TTL сессии 1 час, TTL waiting_search 2 минуты.
+- `App\Service\UserActivityTracker::recordMessage(User)` — обновляет `User.lastMessageAt`. Вызывается из middleware `HandlerRegistry` на каждом update'е. Нужно Scheduler'у чтобы не слать напоминания во время активного диалога.
+- `App\Notification\TelegramNotifier::sendMessage(chatId, text, replyMarkup?, parseMode?)` — тонкая HTTP-обёртка над Telegram Bot API (без Nutgram). Для side-channel отправок из Scheduler/Messenger workers.
+- `App\Notification\ReminderSender::sendDeadlineReminder(Task): SendResult` — проверяет quiet hours + recently active, отправляет напоминание с inline-кнопками («Сделал / Отложить на час / Беру в работу»). Возвращает SENT / SKIPPED_QUIET_HOURS / SKIPPED_RECENTLY_ACTIVE / SKIPPED_NO_CHAT_ID / FAILED.
+- `App\Scheduler\DeadlineReminderSchedule` (#[AsSchedule('reminders')]) — раз в минуту диспатчит `CheckDeadlineRemindersMessage` через Messenger на транспорт `scheduler_reminders` (doctrine://default).
+- `App\MessageHandler\CheckDeadlineRemindersHandler` — собирает кандидатов через `TaskRepository::findDeadlineReminderCandidates($now)` и вызывает `ReminderSender` для каждого.
 - `App\Telegram\Paginator` — сборка клавиатур пагинации (task picker с «← Назад / Стр. N/M / Далее → / 🔍 Поиск / ✖ Закрыть» + list-keyboard только с навигацией).
 - `App\Telegram\SearchDispatcher` — роутинг поискового текста (после 🔍) в нужный handler по action'у сохранённой сессии.
 

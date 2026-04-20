@@ -173,6 +173,42 @@ class TaskRepository extends ServiceEntityRepository
     }
 
     /**
+     * Задачи, у которых пора отправить напоминание о приближающемся дедлайне.
+     * SQL-часть — простые фильтры:
+     *   deadline IS NOT NULL
+     *   remind_before_deadline_minutes IS NOT NULL
+     *   deadline_reminder_sent_at IS NULL
+     *   status ∈ (pending, in_progress)
+     *
+     * Проверку `deadline - remind_before <= now` делаем в PHP через
+     * `Task::shouldRemindBeforeDeadline($now)` — DQL не умеет смешивать
+     * TIMESTAMPTZ + INT * INTERVAL без нативного SQL, а таких задач
+     * немного (только high/urgent с дедлайном), поэтому PHP-фильтрация
+     * дешевле написания нативного запроса.
+     *
+     * Кандидатов на «дедлайн уже в прошлом, но не послали» не
+     * исключаем — ReminderSender форматирует «уже просрочено на N мин».
+     *
+     * @return Task[]
+     */
+    public function findDeadlineReminderCandidates(\DateTimeImmutable $now): array
+    {
+        $eligible = $this->createQueryBuilder('t')
+            ->andWhere('t.deadline IS NOT NULL')
+            ->andWhere('t.remindBeforeDeadlineMinutes IS NOT NULL')
+            ->andWhere('t.deadlineReminderSentAt IS NULL')
+            ->andWhere('t.status IN (:open)')
+            ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS])
+            ->getQuery()
+            ->getResult();
+
+        return array_values(array_filter(
+            $eligible,
+            fn (Task $t) => $t->shouldRemindBeforeDeadline($now),
+        ));
+    }
+
+    /**
      * @param TaskStatus[]|null $statuses
      */
     private function buildPaginationQuery(User $user, ?array $statuses, string $search)

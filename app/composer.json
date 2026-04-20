@@ -13,6 +13,7 @@
         "nutgram/nutgram": "^4.45",
         "nyholm/psr7": "^1.8",
         "symfony/console": "7.4.*",
+        "symfony/doctrine-messenger": "7.4.*",
         "symfony/dotenv": "7.4.*",
         "symfony/flex": "^2",
         "symfony/framework-bundle": "7.4.*",

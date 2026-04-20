@@ -55,6 +55,9 @@ class FreeTextHandler
         }
 
         $task->setPriority($dto->priority);
+        if ($dto->remindBeforeDeadlineMinutes !== null) {
+            $task->setRemindBeforeDeadlineMinutes($dto->remindBeforeDeadlineMinutes);
+        }
         $task->setSource(TaskSource::AI_PARSED);
         $task->setSourceRef((string) ($bot->message()?->message_id ?? ''));
 

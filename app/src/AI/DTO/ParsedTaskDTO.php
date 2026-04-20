@@ -19,6 +19,7 @@ final readonly class ParsedTaskDTO
         public TaskPriority $priority = TaskPriority::MEDIUM,
         public array $contextCodes = [],
         public ?string $parserNotes = null,
+        public ?int $remindBeforeDeadlineMinutes = null,
     ) {
     }
 }

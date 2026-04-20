@@ -1,6 +1,6 @@
 DC = docker compose
 
-.PHONY: up down restart build bash logs ps clean bot-logs bot-restart
+.PHONY: up down restart build bash logs ps clean bot-logs bot-restart scheduler-logs scheduler-restart
 
 up:
 	$(DC) up -d
@@ -31,3 +31,9 @@ bot-logs:
 
 bot-restart:
 	$(DC) restart bot
+
+scheduler-logs:
+	$(DC) logs -f scheduler
+
+scheduler-restart:
+	$(DC) restart scheduler

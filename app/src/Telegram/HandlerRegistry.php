@@ -13,12 +13,15 @@ use App\Telegram\Handler\FreeCallbackHandler;
 use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\FreeTextHandler;
 use App\Telegram\Handler\ListCallbackHandler;
+use App\Telegram\Handler\ReminderCallbackHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
 use App\Telegram\Handler\SnoozeHandler;
 use App\Telegram\Handler\StartHandler;
 use App\Telegram\Handler\UnblockHandler;
+use App\Service\TelegramUserResolver;
+use App\Service\UserActivityTracker;
 use App\Telegram\Middleware\WhitelistMiddleware;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
@@ -42,6 +45,9 @@ class HandlerRegistry
         private readonly FreeTextHandler $freeTextHandler,
         private readonly AssistantHandler $assistantHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
+        private readonly ReminderCallbackHandler $reminderCallbackHandler,
+        private readonly TelegramUserResolver $userResolver,
+        private readonly UserActivityTracker $activityTracker,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -49,6 +55,21 @@ class HandlerRegistry
     public function register(Nutgram $bot): void
     {
         $bot->middleware($this->whitelistMiddleware);
+
+        // Записываем lastMessageAt после каждого update'а от пользователя.
+        // Нужно Scheduler'у чтобы не слать напоминание во время активного
+        // диалога (см. User::isRecentlyActive).
+        $userResolver = $this->userResolver;
+        $activityTracker = $this->activityTracker;
+        $bot->middleware(function (Nutgram $bot, $next) use ($userResolver, $activityTracker): void {
+            try {
+                $user = $userResolver->resolve($bot);
+                $activityTracker->recordMessage($user);
+            } catch (\Throwable) {
+                // Если резолв провалился — пропускаем, пусть handlers разбираются
+            }
+            $next($bot);
+        });
 
         $bot->onCommand('start', $this->startHandler);
         $bot->onCommand('help', $this->helpHandler);
@@ -78,6 +99,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('deps:{data}', $this->taskActionCallbackHandler);
         $bot->onCallbackQueryData('free:{data}', $this->freeCallbackHandler);
         $bot->onCallbackQueryData('list:{data}', $this->listCallbackHandler);
+        $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
 
         // Свободный текст теперь идёт в Assistant (tool calling). FreeTextHandler
         // оставлен в коде как быстрый откат — если assistant начнёт сбоить,

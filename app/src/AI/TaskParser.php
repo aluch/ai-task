@@ -79,6 +79,7 @@ class TaskParser
           "priority": "low|medium|high|urgent",
           "priority_reasoning": "Короткое обоснование приоритета",
           "context_codes": ["needs_internet", "quick"],
+          "remind_before_deadline_minutes": 60,
           "notes": "Что непонятно или спорно в запросе — если всё ясно, null"
         }
 
@@ -121,6 +122,19 @@ class TaskParser
            ВАЖНО: контекст «quick» означает задачу до 15 минут. Ставь quick ТОЛЬКО если
            estimated_minutes ≤ 15. Если задача занимает больше — НЕ ставь quick, даже если
            она кажется простой.
+
+        7. Remind_before_deadline_minutes — за сколько минут до дедлайна напомнить. Ставь
+           это поле ТОЛЬКО если выполнены ОБА условия:
+           - У задачи есть deadline (не null)
+           - Priority = high ИЛИ urgent
+           В остальных случаях — null.
+           Рекомендации:
+           - urgent + дедлайн сегодня → 30
+           - high + дедлайн сегодня → 60
+           - high + дедлайн завтра или позже → 120
+           - urgent + дедлайн завтра или позже → 60
+           - Если estimated_minutes > 60 (задача длинная), увеличь напоминание на estimated_minutes,
+             чтобы пользователь успел начать заранее.
         PROMPT;
     }
 
@@ -172,6 +186,18 @@ class TaskParser
             ? $json['notes']
             : null;
 
+        $remindBefore = null;
+        if (isset($json['remind_before_deadline_minutes']) && is_int($json['remind_before_deadline_minutes'])) {
+            $candidate = $json['remind_before_deadline_minutes'];
+            // Санитизация: имеет смысл только при наличии deadline и высоком приоритете
+            if ($candidate > 0
+                && $deadline !== null
+                && in_array($priority, [TaskPriority::HIGH, TaskPriority::URGENT], true)
+            ) {
+                $remindBefore = $candidate;
+            }
+        }
+
         return new ParsedTaskDTO(
             title: $title,
             description: $description,
@@ -180,6 +206,7 @@ class TaskParser
             priority: $priority,
             contextCodes: $contextCodes,
             parserNotes: $notes,
+            remindBeforeDeadlineMinutes: $remindBefore,
         );
     }
 
