@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Notification;
 
+use App\Clock\Clock;
 use App\Entity\Task;
 use App\Enum\TaskPriority;
 use Doctrine\Persistence\ManagerRegistry;
@@ -21,9 +22,13 @@ use Psr\Log\LoggerInterface;
 class ReminderSender
 {
     public function __construct(
-        private readonly TelegramNotifier $notifier,
+        private readonly TelegramNotifierInterface $notifier,
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
+        // NB: $clock — НЕ readonly потому что SmokeHarness подменяет
+        // его через reflection (PHP 8.3 readonly не даёт менять
+        // даже через reflection). Прод-код на это не опирается.
+        private Clock $clock,
     ) {
     }
 
@@ -35,7 +40,7 @@ class ReminderSender
             return SendResult::SKIPPED_NO_CHAT_ID;
         }
 
-        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $now = $this->clock->now();
 
         if ($user->isQuietHoursNow($now)) {
             $this->logger->info('Reminder skipped (quiet hours)', [
@@ -103,7 +108,7 @@ class ReminderSender
             return SendResult::SKIPPED_NO_CHAT_ID;
         }
 
-        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $now = $this->clock->now();
 
         if ($user->isQuietHoursNow($now)) {
             return SendResult::SKIPPED_QUIET_HOURS;
@@ -156,7 +161,7 @@ class ReminderSender
             return SendResult::SKIPPED_NO_CHAT_ID;
         }
 
-        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $now = $this->clock->now();
 
         // Только quiet hours — разбуживание это событие, которое пользователь
         // сам запланировал, а не автоматический пинок. isRecentlyActive тут
@@ -264,8 +269,7 @@ class ReminderSender
 
         $deadline = $task->getDeadline();
         if ($deadline !== null) {
-            $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-            $lines[] = '⏰ дедлайн ' . $this->formatTimeLeft($deadline, $now);
+            $lines[] = '⏰ дедлайн ' . $this->formatTimeLeft($deadline, $this->clock->now());
         }
 
         $snoozedUntil = $task->getSnoozedUntil();

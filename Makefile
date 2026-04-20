@@ -1,6 +1,6 @@
 DC = docker compose
 
-.PHONY: up down restart build bash logs ps clean bot-logs bot-restart scheduler-logs scheduler-restart
+.PHONY: up down restart build bash logs ps clean bot-logs bot-restart scheduler-logs scheduler-restart smoke-all smoke-reset smoke-assistant smoke-parser smoke-scenario smoke-tick
 
 up:
 	$(DC) up -d
@@ -37,3 +37,23 @@ scheduler-logs:
 
 scheduler-restart:
 	$(DC) restart scheduler
+
+# Smoke-команды — быстрая самопроверка reminder-пайплайна + AI-промптов.
+# Подробности: docs/testing/smoke.md
+smoke-all:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:all
+
+smoke-reset:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:reset
+
+smoke-assistant:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:assistant "$(msg)"
+
+smoke-parser:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:parser "$(msg)"
+
+smoke-scenario:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:reminder-scenario $(name)
+
+smoke-tick:
+	$(DC) exec --user 1000:1000 php php bin/console app:smoke:reminder-tick

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Service;
 
+use App\Clock\Clock;
 use App\Entity\User;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -17,6 +18,7 @@ class UserActivityTracker
 {
     public function __construct(
         private readonly ManagerRegistry $doctrine,
+        private Clock $clock,
     ) {
     }
 
@@ -30,7 +32,7 @@ class UserActivityTracker
             }
         }
 
-        $user->setLastMessageAt(new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
+        $user->setLastMessageAt($this->clock->now());
         $em->flush();
     }
 }

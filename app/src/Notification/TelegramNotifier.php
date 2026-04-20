@@ -14,9 +14,16 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  * требует перехватывать update'ы.
  *
  * Для сообщений ВНУТРИ polling-цикла (handlers бота) используй Nutgram.
+ *
+ * Умеет мутабельно переключаться в in-memory режим через
+ * `useInMemory(InMemoryTelegramNotifier)` — это делают smoke-команды,
+ * чтобы не слать реальных HTTP-запросов. Прод-использование просто
+ * не трогает этот тумблер.
  */
-class TelegramNotifier
+class TelegramNotifier implements TelegramNotifierInterface
 {
+    private ?InMemoryTelegramNotifier $inMemory = null;
+
     public function __construct(
         private readonly HttpClientInterface $httpClient,
         private readonly LoggerInterface $logger,
@@ -33,12 +40,27 @@ class TelegramNotifier
      * @return bool true при успехе; false при ошибке (логируется). Ошибки не
      *   пробрасываются, чтобы один несработавший notify не убивал worker.
      */
+    /**
+     * Переключить этот notifier в in-memory режим: все последующие
+     * sendMessage делегируются переданному InMemoryTelegramNotifier,
+     * реальные HTTP-запросы не выполняются. Можно вызывать несколько раз —
+     * каждый раз переприсваивается sink.
+     */
+    public function useInMemory(InMemoryTelegramNotifier $sink): void
+    {
+        $this->inMemory = $sink;
+    }
+
     public function sendMessage(
         int|string $chatId,
         string $text,
         ?array $replyMarkup = null,
         ?string $parseMode = null,
     ): bool {
+        if ($this->inMemory !== null) {
+            return $this->inMemory->sendMessage($chatId, $text, $replyMarkup, $parseMode);
+        }
+
         if ($this->token === '') {
             $this->logger->error('TelegramNotifier: token not configured');
 

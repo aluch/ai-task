@@ -77,3 +77,16 @@ services:
     App\Notification\TelegramNotifier:
         arguments:
             $token: '%telegram.bot_token%'
+
+    # Прод-реализация TelegramNotifierInterface — HTTP-клиент к Bot API.
+    # Smoke-команды в runtime переключают его в in-memory режим через
+    # `useInMemory()` на том же singleton-инстансе.
+    App\Notification\TelegramNotifierInterface:
+        alias: App\Notification\TelegramNotifier
+
+    # Clock: прод = SystemClock. Smoke-команды через SmokeHarness::freezeTimeAt
+    # подменяют свойство на FrozenClock в сервисах reminder pipeline
+    # (reflection). Никаких container->set() — Symfony 7 запрещает
+    # подменять уже-инициализированные сервисы.
+    App\Clock\Clock:
+        alias: App\Clock\SystemClock

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\MessageHandler;
 
+use App\Clock\Clock;
 use App\Entity\Task;
 use App\Message\CheckDeadlineRemindersMessage;
 use App\Notification\ReminderSender;
@@ -18,6 +19,7 @@ final class CheckDeadlineRemindersHandler
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
         private readonly LoggerInterface $logger,
+        private Clock $clock,
     ) {
     }
 
@@ -25,7 +27,7 @@ final class CheckDeadlineRemindersHandler
     {
         $em = $this->doctrine->getManager();
         $repo = $em->getRepository(Task::class);
-        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $now = $this->clock->now();
 
         $candidates = $repo->findDeadlineReminderCandidates($now);
 

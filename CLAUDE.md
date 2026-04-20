@@ -35,6 +35,11 @@ Telegram-бот с интеграцией Claude API для управления
 - `make bot-restart` — перезапуск бота
 - `make scheduler-logs` — логи scheduler-воркера (напоминания)
 - `make scheduler-restart` — перезапуск scheduler
+- `make smoke-all` — прогнать все smoke-сценарии (8 штук). Подробности — `docs/testing/smoke.md`
+- `make smoke-reset` — удалить тестового пользователя (telegram_id=999999999)
+- `make smoke-assistant msg="..."` — разовый прогон Assistant от имени тест-юзера
+- `make smoke-parser msg="..."` — DTO-срез TaskParser без сайд-эффектов
+- `make smoke-scenario name=<scenario>` — один именованный сценарий
 
 Внутри php-контейнера: `composer`, `php bin/console ...` (после установки Symfony).
 
@@ -271,6 +276,37 @@ Haiku выбрана для парсинга: достаточно умна дл
 - **Свободный текст** идёт в Assistant, который через tool calling сам решает что сделать (создать задачу, показать список, пометить выполненной, отложить). Для диалогового UX.
 
 Правило: если есть готовая команда под задачу — используем её. Если пользователь пишет человеческим языком — ассистент разбирается.
+
+## Smoke-тесты
+
+`make smoke-all` прогоняет 8 сценариев reminder-пайплайна за ~2 секунды
+без реальных Telegram-запросов — используется InMemoryTelegramNotifier и
+FrozenClock. **После любых изменений в ReminderSender, handler'ах, правилах
+quiet hours / recently_active, reminder-репо методах — обязательный прогон.**
+
+Каждый сценарий должен быть ✅. Если что-то падает — это реальный баг,
+не смиряйся, разберись. Подробности: `docs/testing/smoke.md`.
+
+Тестируемые абстракции:
+
+- **`App\Clock\Clock`** (interface) — `SystemClock` в проде, `FrozenClock`
+  в smoke-сценариях. Инжектится в reminder pipeline: `ReminderSender`,
+  три `Check*RemindersHandler`, `UserActivityTracker`. Остальные сервисы
+  (TaskParser, handlers бота и т.д.) продолжают использовать `new DateTimeImmutable`
+  — это терпимо, основная логика времени в reminder-пайплайне. Поле
+  `$clock` в этих сервисах **не `readonly`** — SmokeHarness подменяет его
+  через reflection (PHP 8.3 запрещает менять readonly даже через reflection).
+
+- **`App\Notification\TelegramNotifierInterface`** — прод-реализация
+  `TelegramNotifier` (HTTP POST в Bot API), smoke-реализация
+  `InMemoryTelegramNotifier` (накопление в массиве). `TelegramNotifier`
+  знает про in-memory режим через метод `useInMemory(sink)` — SmokeHarness
+  вызывает его при конструировании, с тех пор все отправки в тесте
+  идут в in-memory.
+
+- **`App\Smoke\SmokeHarness`** — фасад для smoke-команд: тестовый юзер
+  (tg_id=999999999), подмена notifier'а и clock'а, reset БД. НЕ используй
+  его в прод-коде.
 
 ## Следующие шаги
 
