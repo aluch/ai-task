@@ -80,6 +80,7 @@ class TaskParser
           "priority_reasoning": "Короткое обоснование приоритета",
           "context_codes": ["needs_internet", "quick"],
           "remind_before_deadline_minutes": 60,
+          "reminder_interval_minutes": null,
           "notes": "Что непонятно или спорно в запросе — если всё ясно, null"
         }
 
@@ -147,6 +148,24 @@ class TaskParser
              estimated_minutes, чтобы пользователь успел начать заранее.
 
            В остальных случаях — null.
+
+        8. Reminder_interval_minutes — как часто пинать пользователя о незавершённой
+           задаче БЕЗ дедлайна. Это про «раз в N минут напоминай пока не сделаю».
+           Измеряется в минутах. null = периодические напоминания не нужны.
+
+           Ставь это поле ТОЛЬКО если:
+           - Пользователь ЯВНО просит: «напоминай каждый день», «пинай каждые
+             2 часа», «не давай забыть». Бери интервал из запроса.
+           - Задача БЕЗ дедлайна + priority=urgent → 180 (каждые 3 часа).
+           - Задача БЕЗ дедлайна + priority=high → 360 (каждые 6 часов),
+             или 720 (12 часов) если задача кажется «на неделю».
+
+           Минимум — 60 минут. Даже если пользователь просит «каждые 5 минут» —
+           ставь 60 и в notes упомяни что поставили минимум час.
+
+           НЕ ставь reminder_interval_minutes для задач:
+           - С дедлайном (обслуживаются через remind_before_deadline_minutes).
+           - priority=low или medium без явного запроса пользователя.
         PROMPT;
     }
 
@@ -210,12 +229,25 @@ class TaskParser
             }
         }
 
+        $reminderInterval = null;
+        if (isset($json['reminder_interval_minutes']) && is_int($json['reminder_interval_minutes'])) {
+            $candidate = $json['reminder_interval_minutes'];
+            // Санитизация: минимум 60 минут (чтобы не спамить). Пользователь
+            // мог попросить «каждые 5 минут» — подняли до часа, но оставили
+            // периодичность, а не сбросили в null.
+            if ($candidate > 0) {
+                $reminderInterval = max(60, $candidate);
+            }
+        }
+
         $this->logger->info('TaskParser: parsed task', [
             'title' => $title,
             'deadline' => $deadline?->format('c'),
             'priority' => $priority->value,
             'remind_before_deadline_minutes' => $remindBefore,
+            'reminder_interval_minutes' => $reminderInterval,
             'ai_remind_before_raw' => $json['remind_before_deadline_minutes'] ?? null,
+            'ai_reminder_interval_raw' => $json['reminder_interval_minutes'] ?? null,
         ]);
 
         return new ParsedTaskDTO(
@@ -227,6 +259,7 @@ class TaskParser
             contextCodes: $contextCodes,
             parserNotes: $notes,
             remindBeforeDeadlineMinutes: $remindBefore,
+            reminderIntervalMinutes: $reminderInterval,
         );
     }
 

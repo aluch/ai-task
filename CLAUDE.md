@@ -199,9 +199,15 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `App\Service\PaginationStore` — Redis-хранилище состояний пагинации (state для inline-меню с листанием + waiting_search для кнопки 🔍 Поиск). TTL сессии 1 час, TTL waiting_search 2 минуты.
 - `App\Service\UserActivityTracker::recordMessage(User)` — обновляет `User.lastMessageAt`. Вызывается из middleware `HandlerRegistry` на каждом update'е. Нужно Scheduler'у чтобы не слать напоминания во время активного диалога.
 - `App\Notification\TelegramNotifier::sendMessage(chatId, text, replyMarkup?, parseMode?)` — тонкая HTTP-обёртка над Telegram Bot API (без Nutgram). Для side-channel отправок из Scheduler/Messenger workers.
-- `App\Notification\ReminderSender::sendDeadlineReminder(Task): SendResult` — проверяет quiet hours + recently active, отправляет напоминание с inline-кнопками («Сделал / Отложить на час / Беру в работу»). Возвращает SENT / SKIPPED_QUIET_HOURS / SKIPPED_RECENTLY_ACTIVE / SKIPPED_NO_CHAT_ID / FAILED.
-- `App\Scheduler\DeadlineReminderSchedule` (#[AsSchedule('reminders')]) — раз в минуту диспатчит `CheckDeadlineRemindersMessage` через Messenger на транспорт `scheduler_reminders` (doctrine://default).
-- `App\MessageHandler\CheckDeadlineRemindersHandler` — собирает кандидатов через `TaskRepository::findDeadlineReminderCandidates($now)` и вызывает `ReminderSender` для каждого.
+- `App\Notification\ReminderSender` — три типа уведомлений (все с quiet hours, у каждого своя политика по recently_active):
+  - `sendDeadlineReminder(Task)` (Тип А) — напоминание о приближающемся дедлайне. Если `remindBeforeDeadlineMinutes < 5`, фильтр recently_active пропускается (пользователь сам просил короткое).
+  - `sendPeriodicReminder(Task)` (Тип Б) — периодический «пинок» по задаче без дедлайна, каждые `reminderIntervalMinutes` минут (для IN_PROGRESS — x2). Обновляет `lastRemindedAt` как скользящее окно.
+  - `sendSnoozeWakeup(Task)` (Тип В) — уведомление «задача снова активна» по истечении `snoozedUntil`, с последующей реактивацией (PENDING). Recently_active не применяется. При quiet hours задача остаётся SNOOZED до следующего тика.
+
+  Все возвращают `SendResult`: SENT / SKIPPED_QUIET_HOURS / SKIPPED_RECENTLY_ACTIVE / SKIPPED_NO_CHAT_ID / FAILED.
+- `App\Scheduler\ReminderSchedule` (#[AsSchedule('reminders')]) — раз в минуту диспатчит три recurring message'а через Messenger на транспорт `scheduler_reminders` (doctrine://default): `CheckDeadlineRemindersMessage`, `CheckPeriodicRemindersMessage`, `CheckSnoozeWakeupsMessage`.
+- `App\MessageHandler\CheckDeadlineRemindersHandler` / `CheckPeriodicRemindersHandler` / `CheckSnoozeWakeupsHandler` — каждый выбирает своих кандидатов через `TaskRepository` (`findDeadlineReminderCandidates`, `findPeriodicReminderCandidates`, `findSnoozeWakeupCandidates`) и прогоняет через `ReminderSender`.
+- **Пробуждение SNOOZED — только через Scheduler**. Бывший `SnoozeReactivator` удалён, `TaskRepository::findForUser` больше не пытается lazy-reactivate. Пользователь получает явное уведомление, прежде чем задача появится в списках — ценой латенса до 1 минуты.
 - `App\Telegram\Paginator` — сборка клавиатур пагинации (task picker с «← Назад / Стр. N/M / Далее → / 🔍 Поиск / ✖ Закрыть» + list-keyboard только с навигацией).
 - `App\Telegram\SearchDispatcher` — роутинг поискового текста (после 🔍) в нужный handler по action'у сохранённой сессии.
 
@@ -269,5 +275,4 @@ Haiku выбрана для парсинга: достаточно умна дл
 ## Следующие шаги
 
 1. Добавить worker-контейнер `messenger:consume` на том же php-образе.
-2. Реализовать reminder-планировщик через `symfony/scheduler` (`reminderIntervalMinutes` + `lastRemindedAt`).
-3. Перейти на webhook (когда будет публичный URL/tunneling).
+2. Перейти на webhook (когда будет публичный URL/tunneling).

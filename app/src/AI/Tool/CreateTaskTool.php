@@ -75,6 +75,9 @@ class CreateTaskTool implements AssistantTool
         if ($dto->remindBeforeDeadlineMinutes !== null) {
             $task->setRemindBeforeDeadlineMinutes($dto->remindBeforeDeadlineMinutes);
         }
+        if ($dto->reminderIntervalMinutes !== null) {
+            $task->setReminderIntervalMinutes($dto->reminderIntervalMinutes);
+        }
         $task->setSource(TaskSource::AI_PARSED);
 
         if ($dto->contextCodes !== []) {
@@ -98,6 +101,7 @@ class CreateTaskTool implements AssistantTool
             'deadline' => $task->getDeadline()?->format('c'),
             'priority' => $task->getPriority()->value,
             'remind_before_deadline_minutes' => $task->getRemindBeforeDeadlineMinutes(),
+            'reminder_interval_minutes' => $task->getReminderIntervalMinutes(),
         ]);
 
         $parts = ["Создана задача: «{$task->getTitle()}»"];

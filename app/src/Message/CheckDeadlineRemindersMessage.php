@@ -6,7 +6,7 @@ namespace App\Message;
 
 /**
  * Маркерное сообщение: «пора проверить дедлайны и разослать напоминания».
- * Отправляется раз в минуту из `DeadlineReminderSchedule`.
+ * Отправляется раз в минуту из `ReminderSchedule`.
  */
 final class CheckDeadlineRemindersMessage
 {

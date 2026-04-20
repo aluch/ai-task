@@ -7,7 +7,6 @@ namespace App\Repository;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Enum\TaskStatus;
-use App\Service\SnoozeReactivator;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -19,20 +18,9 @@ class TaskRepository extends ServiceEntityRepository
     /** @var TaskStatus[] */
     public const ACTIVE_STATUSES = [TaskStatus::PENDING, TaskStatus::IN_PROGRESS];
 
-    private ?SnoozeReactivator $reactivator = null;
-
     public function __construct(ManagerRegistry $registry)
     {
         parent::__construct($registry, Task::class);
-    }
-
-    /**
-     * Setter-инъекция чтобы избежать циклической зависимости:
-     * SnoozeReactivator использует EntityManager, который зависит от репозиториев.
-     */
-    public function setReactivator(SnoozeReactivator $reactivator): void
-    {
-        $this->reactivator = $reactivator;
     }
 
     /**
@@ -45,15 +33,15 @@ class TaskRepository extends ServiceEntityRepository
      *   - [] (пустой массив) → все статусы без фильтра.
      *   - Конкретный массив → только перечисленные статусы.
      *
-     * Всегда вызывает SnoozeReactivator::reactivateExpired() перед выборкой,
-     * чтобы истёкшие SNOOZED стали PENDING и попали в «активные».
+     * Разбуживание SNOOZED происходит строго через Scheduler
+     * (`CheckSnoozeWakeupsHandler`). Здесь никакой lazy-реактивации —
+     * пользователь получит уведомление от бота, прежде чем задача
+     * появится в списках.
      *
      * @return Task[]
      */
     public function findForUser(User $user, ?array $statuses = null, int $limit = 20): array
     {
-        $this->reactivator?->reactivateExpired($user);
-
         if ($statuses === null) {
             $statuses = self::ACTIVE_STATUSES;
         }
@@ -105,8 +93,6 @@ class TaskRepository extends ServiceEntityRepository
         int $offset = 0,
         string $search = '',
     ): array {
-        $this->reactivator?->reactivateExpired($user);
-
         $qb = $this->buildPaginationQuery($user, $statuses, $search);
 
         // Сортировка: приоритет через CASE → дедлайн nulls last → createdAt
@@ -138,8 +124,6 @@ class TaskRepository extends ServiceEntityRepository
      */
     public function countForUser(User $user, ?array $statuses = null, string $search = ''): int
     {
-        $this->reactivator?->reactivateExpired($user);
-
         $qb = $this->buildPaginationQuery($user, $statuses, $search);
         $qb->select('COUNT(t.id)');
 
@@ -206,6 +190,87 @@ class TaskRepository extends ServiceEntityRepository
             $eligible,
             fn (Task $t) => $t->shouldRemindBeforeDeadline($now),
         ));
+    }
+
+    /**
+     * Задачи, у которых пора отправить периодическое напоминание.
+     * Условие кандидата:
+     *   reminder_interval_minutes IS NOT NULL
+     *   status IN (pending, in_progress) — SNOOZED сознательно исключены,
+     *     они сначала должны пройти через Тип В (разбуживание с нотификацией)
+     *   last_reminded_at IS NULL AND created_at + 60min <= now
+     *     → первое напоминание не раньше чем через час после создания,
+     *       чтобы не спамить сразу после создания задачи
+     *   OR last_reminded_at + reminder_interval_minutes * interval <= now
+     *
+     * IN_PROGRESS → эффективный интервал x2. Проверка в PHP (DQL не любит
+     * условную арифметику по статусу).
+     *
+     * Временную арифметику делаем в PHP, не в DQL, по тем же причинам что
+     * в findDeadlineReminderCandidates: DATETIME + INT*INTERVAL в DQL
+     * через DATE_ADD ведёт себя странно с TIMESTAMPTZ, а кандидатов мало.
+     *
+     * @return Task[]
+     */
+    public function findPeriodicReminderCandidates(\DateTimeImmutable $now): array
+    {
+        $eligible = $this->createQueryBuilder('t')
+            ->andWhere('t.reminderIntervalMinutes IS NOT NULL')
+            ->andWhere('t.status IN (:open)')
+            ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS])
+            ->getQuery()
+            ->getResult();
+
+        return array_values(array_filter(
+            $eligible,
+            fn (Task $t) => $this->shouldSendPeriodicReminder($t, $now),
+        ));
+    }
+
+    private function shouldSendPeriodicReminder(Task $task, \DateTimeImmutable $now): bool
+    {
+        $interval = $task->getReminderIntervalMinutes();
+        if ($interval === null) {
+            return false;
+        }
+
+        // Для in_progress увеличиваем эффективный интервал вдвое — задача
+        // уже в работе, надоедать реже.
+        if ($task->getStatus() === TaskStatus::IN_PROGRESS) {
+            $interval *= 2;
+        }
+
+        $last = $task->getLastRemindedAt();
+        if ($last === null) {
+            // Ещё ни разу не напоминали. Даём час на «осесть» после создания
+            // (иначе напомним ровно в момент создания — некрасиво).
+            $firstAllowed = $task->getCreatedAt()->modify('+60 minutes');
+
+            return $now >= $firstAllowed;
+        }
+
+        $nextAllowed = $last->modify("+{$interval} minutes");
+
+        return $now >= $nextAllowed;
+    }
+
+    /**
+     * Отложенные задачи, которым пора проснуться: snoozedUntil <= now.
+     * Используется CheckSnoozeWakeupsHandler'ом для активной реактивации
+     * с уведомлением пользователя (вместо прежнего lazy-пробуждения).
+     *
+     * @return Task[]
+     */
+    public function findSnoozeWakeupCandidates(\DateTimeImmutable $now): array
+    {
+        return $this->createQueryBuilder('t')
+            ->andWhere('t.status = :snoozed')
+            ->andWhere('t.snoozedUntil IS NOT NULL')
+            ->andWhere('t.snoozedUntil <= :now')
+            ->setParameter('snoozed', TaskStatus::SNOOZED)
+            ->setParameter('now', $now)
+            ->getQuery()
+            ->getResult();
     }
 
     /**

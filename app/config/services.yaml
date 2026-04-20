@@ -77,8 +77,3 @@ services:
     App\Notification\TelegramNotifier:
         arguments:
             $token: '%telegram.bot_token%'
-
-    # Setter injection чтобы избежать цикла: SnoozeReactivator → EM → Repository.
-    App\Repository\TaskRepository:
-        calls:
-            - setReactivator: ['@App\Service\SnoozeReactivator']

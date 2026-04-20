@@ -4,22 +4,27 @@
 
 ## Концепция
 
-Планируются три типа напоминаний:
+Три типа напоминаний, все реализованы:
 
-1. **Приближающийся дедлайн** — *реализовано в 5.1*. За N минут до дедлайна (N задаёт AI при парсинге) бот присылает сообщение с кнопками «Сделал / Отложить / Беру в работу».
-2. **Разбуживание SNOOZED** — *отложено до 5.2*. Сейчас задача сама возвращается в PENDING через `SnoozeReactivator` при следующей выборке. Хочется активного уведомления.
-3. **Периодические напоминания** — *отложено до 5.2*. `reminderIntervalMinutes` + `lastRemindedAt` уже в модели, но логика не включена.
+1. **Приближающийся дедлайн (Тип А)** — за N минут до дедлайна (N задаёт AI или пользователь явно) бот присылает уведомление с кнопками «Сделал / Отложить / Беру в работу».
+2. **Периодические напоминания (Тип Б)** — «пинать» задачу без дедлайна каждые N минут, пока пользователь не закроет. Для залежавшихся важных задач.
+3. **Пробуждение SNOOZED (Тип В)** — по истечении `snoozedUntil` бот присылает уведомление «задача снова активна» и только после этого переводит задачу в PENDING.
 
 ## Модель данных
 
 ### Task
 
-- `remindBeforeDeadlineMinutes: ?int` — за сколько минут до дедлайна напомнить. `null` = не напоминать. Ставится AI при парсинге только для задач с дедлайном и приоритетом ≥ high.
-- `deadlineReminderSentAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — когда уже отправили уведомление, чтобы не слать повторно. `null` = ещё не отправлено.
+- `remindBeforeDeadlineMinutes: ?int` — за сколько минут до дедлайна напомнить. `null` = не напоминать. Ставится AI при парсинге: либо по явной просьбе пользователя (любой priority), либо авто для дедлайна + priority ≥ high.
+- `deadlineReminderSentAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — когда уже отправили deadline-уведомление. `null` = ещё не отправлено. После snooze сбрасывается в `null`, чтобы напомнить снова.
+- `reminderIntervalMinutes: ?int` — интервал периодических напоминаний в минутах. `null` = не пинать. Ставится AI только для задач **без дедлайна** с priority ≥ high, либо по явной просьбе пользователя. Минимум — 60 минут (AI санитизирует «каждые 5 минут» → 60).
+- `lastRemindedAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — скользящее окно для Типа Б. Ставится в момент отправки периодического напоминания. `null` → ещё ни разу не напоминали (но первое напоминание не раньше `createdAt + 60 минут`, чтобы не спамить сразу после создания).
+- `snoozedUntil: ?\DateTimeImmutable` (TIMESTAMPTZ) — до какого момента задача в статусе SNOOZED. По истечении — `CheckSnoozeWakeupsHandler` пришлёт уведомление и переведёт в PENDING.
 
-**Методы**:
-- `markDeadlineReminderSent()` — устанавливает `deadlineReminderSentAt = now (UTC)`.
+**Методы Task**:
+- `markDeadlineReminderSent()` — ставит `deadlineReminderSentAt = now (UTC)`.
 - `shouldRemindBeforeDeadline(\DateTimeImmutable $now): bool` — true если deadline + remind_before ≤ now, и ещё не отправляли.
+- `setLastRemindedAt(?\DateTimeImmutable)` — используется `sendPeriodicReminder` для сдвига окна.
+- `reactivate()` — `status = PENDING`, `snoozedUntil = null`. Вызывается из `sendSnoozeWakeup` после успешной отправки.
 
 ### User
 
@@ -33,55 +38,94 @@
 
 ## Scheduler архитектура
 
-Используется Symfony Scheduler + Messenger.
+Symfony Scheduler + Messenger. Один ScheduleProvider с тремя recurring message'ами, ежеминутно:
 
 ```
-DeadlineReminderSchedule (#[AsSchedule('reminders')])
-   │ RecurringMessage::every('1 minute', CheckDeadlineRemindersMessage)
+ReminderSchedule (#[AsSchedule('reminders')])
+   │ RecurringMessage::every('1 minute', CheckDeadlineRemindersMessage)  ← Тип А
+   │ RecurringMessage::every('1 minute', CheckPeriodicRemindersMessage)  ← Тип Б
+   │ RecurringMessage::every('1 minute', CheckSnoozeWakeupsMessage)      ← Тип В
    ▼
 Messenger transport scheduler_reminders (DSN: doctrine://default)
    │
    ▼
-messenger:consume scheduler_reminders  (Docker-сервис `scheduler`)
+messenger:consume scheduler_reminders  (Docker-сервис `scheduler`, prod env)
    │
    ▼
-CheckDeadlineRemindersHandler
-   │ TaskRepository::findDeadlineReminderCandidates($now)
-   │ foreach task → ReminderSender::sendDeadlineReminder($task)
+CheckDeadlineRemindersHandler   → ReminderSender::sendDeadlineReminder
+CheckPeriodicRemindersHandler   → ReminderSender::sendPeriodicReminder
+CheckSnoozeWakeupsHandler       → ReminderSender::sendSnoozeWakeup
 ```
 
-**Docker-сервис** `scheduler` запускает `messenger:consume scheduler_reminders --time-limit=3600`. Worker сам завершается через час, Docker рестартит — защита от утечек в long-running процессе.
+**Docker-сервис** `scheduler` запускает `messenger:consume scheduler_reminders --time-limit=3600` в `APP_ENV=prod` с предварительным `cache:warmup`. Prod-режим обязателен — в dev `TraceableEventDispatcher` ломается в worker loop (баг Symfony 7.4). Worker сам завершается через час, Docker рестартит — защита от утечек в long-running процессе.
 
 **Префикс транспорта** `scheduler_` — конвенция Symfony Scheduler: для `#[AsSchedule('reminders')]` ожидается транспорт `scheduler_reminders`.
 
 ## ReminderSender
 
-`App\Notification\ReminderSender::sendDeadlineReminder(Task): SendResult`.
+Один класс — три публичных метода. У каждого общие шаги: проверка `telegramId`, проверка quiet hours, проверка recently_active (у разных типов — разные правила), отправка через `TelegramNotifier`, обновление состояния.
 
-### Алгоритм
+### sendDeadlineReminder(Task): SendResult — Тип А
 
-1. Проверка `telegramId` — `SKIPPED_NO_CHAT_ID` если пусто
-2. Проверка `user->isQuietHoursNow()` → **SKIPPED_QUIET_HOURS**, не помечаем sent (после выхода из тихих часов Scheduler попробует снова)
-3. Проверка `user->isRecentlyActive()` → **SKIPPED_RECENTLY_ACTIVE** (активный диалог — незачем дублировать), не помечаем
-4. Отправка через `TelegramNotifier::sendMessage()` с inline-клавиатурой
-5. При успехе → `task->markDeadlineReminderSent()` + flush → **SENT**
-6. При ошибке → логируем, НЕ помечаем sent → **FAILED** (Scheduler попробует снова через минуту)
+1. Нет `telegramId` → `SKIPPED_NO_CHAT_ID`.
+2. Quiet hours → `SKIPPED_QUIET_HOURS`, не помечаем sent.
+3. Recently active **с исключением коротких напоминаний**:
+   - `remindBeforeDeadlineMinutes < 5` → фильтр не применяется (пользователь сам попросил короткое — блокировать его активным диалогом бессмысленно).
+   - Иначе → `SKIPPED_RECENTLY_ACTIVE`, не помечаем sent.
+4. Отправка с inline-клавиатурой.
+5. Успех → `markDeadlineReminderSent()` + flush → `SENT`.
+6. Ошибка → `FAILED`, не помечаем.
 
-### Quiet hours
+### sendPeriodicReminder(Task): SendResult — Тип Б
 
-**Зачем**: не будить пользователя ночью. Текущий дефолт — 22:00-08:00 в локальной зоне.
+1. Нет `telegramId` → `SKIPPED_NO_CHAT_ID`.
+2. Quiet hours → `SKIPPED_QUIET_HOURS`.
+3. Recently active → `SKIPPED_RECENTLY_ACTIVE`. Короткого исключения нет: «пинай каждые 2 часа» не значит «пинай прямо сейчас, я пишу».
+4. Текст формата:
+   ```
+   🔔 Напоминание о задаче:
 
-**Механика**: `User::isQuietHoursNow()` конвертирует UTC-момент в зону юзера, проверяет попадание в `[quietStartHour, quietEndHour)`. Если `start > end` (интервал через полночь, как 22→8) — логика «час ≥ start ИЛИ час < end».
+   📝 Позвонить в страховую
+   🔥 high
 
-**Пропущенные напоминания**: не помечаем `deadlineReminderSentAt`. При следующем тике Scheduler снова увидит кандидата — пока quiet hours, снова SKIPPED. Как только время вышло — SENT.
+   Висит уже 2 дня.
+   ```
+5. Успех → `setLastRemindedAt(now)` + flush → `SENT`. Важно: `lastRemindedAt` — скользящее окно, не флаг «отправлено один раз».
 
-### Recently active
+### sendSnoozeWakeup(Task): SendResult — Тип В
 
-**Зачем**: если юзер только что писал боту, нет смысла слать уведомление с другой стороны диалога. Дождёмся паузы.
+1. Нет `telegramId` → `SKIPPED_NO_CHAT_ID`.
+2. Quiet hours → `SKIPPED_QUIET_HOURS`. **Задача остаётся SNOOZED** — пробудится только когда сможем уведомить.
+3. Recently active **не применяется**: пробуждение — это не автоматический «пинок», а событие, которое пользователь сам запланировал. Отложил до 10:00 — значит в 10:00 разбудить.
+4. Текст формата:
+   ```
+   🔔 Задача снова активна:
 
-**Механика**: `User::lastMessageAt` обновляется в middleware `HandlerRegistry` на каждом update'е через `UserActivityTracker::recordMessage`. `isRecentlyActive(utcNow, 5)` → разница ≤ 5 минут.
+   📝 Починить смеситель на даче
+   ⏰ дедлайн через 3 дня
 
-Не помечаем sent. Scheduler попробует через минуту, потом ещё через минуту — пока активен, пропускаем. Как пауза 5+ минут — отправляем.
+   Ты откладывал до 20.04 10:00.
+   ```
+5. Успех → `reactivate()` (status=PENDING, snoozedUntil=null) + flush → `SENT`.
+
+Во всех трёх случаях — одинаковые три кнопки (см. ниже).
+
+## Фильтр recently_active: исключение для коротких напоминаний
+
+**Зачем**: пользователь пишет «через 3 минуты напомни». AI ставит `remindBeforeDeadlineMinutes=3`. Но пользователь только что писал → `isRecentlyActive(5)` вернёт true → напоминание пропущено, выйдет через 5+ минут, слишком поздно.
+
+**Правило**: если `remindBeforeDeadlineMinutes < 5`, фильтр recently_active не применяется. Пользователь сам заказал короткое напоминание — значит ожидает его получить. Quiet hours продолжают действовать (ночь — это ночь).
+
+**Для Тип Б и Тип В** короткого исключения нет: периодические и разбуживание имеют другую семантику.
+
+## Lazy reactivation снесена
+
+Раньше `SnoozeReactivator::reactivateExpired` вызывался из `TaskRepository::findForUser` перед каждой выборкой. Это работало, пока не было Scheduler'а — но имело проблемы:
+
+- Пользователь узнавал о разбуженной задаче только когда сам открывал `/list` — без уведомления.
+- Могло конкурировать с Scheduler'ом (задача «просыпалась» дважды: в findForUser и через tick).
+
+Теперь источник истины для пробуждения — Scheduler. `SnoozeReactivator` удалён, вызовы из `TaskRepository` убраны. Небольшой латенс до минуты (пока тик не произойдёт) — приемлемая цена за явные уведомления.
 
 ## TelegramNotifier
 
@@ -89,46 +133,47 @@ CheckDeadlineRemindersHandler
 
 Тонкая HTTP-обёртка над `https://api.telegram.org/bot<TOKEN>/sendMessage`. Не использует Nutgram — поднимать polling-бот ради одного `sendMessage` избыточно. Ошибки ловятся и возвращают `false`, не ломая worker.
 
-Для сообщений **внутри** polling-цикла handlers'ы бота продолжают использовать Nutgram. TelegramNotifier — только для side-channel уведомлений (Scheduler, будущие Messenger workers).
-
 ## Callback-кнопки под напоминанием
 
-Три кнопки в клавиатуре:
+Три кнопки, одинаковые для всех трёх типов напоминаний:
 
 | Кнопка | Callback | Действие |
 |---|---|---|
 | ✅ Сделал | `rem:done:<uuid>` | `markDone()` + edit message |
-| ⏸ Отложить на час | `rem:snooze1h:<uuid>` | `snooze(+1h)` + **сбрасывает** `deadlineReminderSentAt` — после разбуживания напомнит снова, если дедлайн ещё не прошёл |
+| ⏸ Отложить на час | `rem:snooze1h:<uuid>` | `snooze(+1h)` + **сбрасывает** `deadlineReminderSentAt` — после разбуживания через 1ч Тип А сработает снова, если дедлайн ещё не прошёл |
 | 🚀 Беру в работу | `rem:start:<uuid>` | status = IN_PROGRESS + edit message |
 
 Обработчик: `App\Telegram\Handler\ReminderCallbackHandler`, зарегистрирован на `rem:{data}`.
 
+**Про snooze и periodic**: snooze1h НЕ сбрасывает `lastRemindedAt` (в отличие от `deadlineReminderSentAt`). `lastRemindedAt` — скользящее окно, и если пользователь часто откладывает задачу с интервалом «раз в 6 часов», сбрасывание окна превратило бы её в спам.
+
 ## TaskParser
 
-В JSON-схему добавлено поле `remind_before_deadline_minutes` (int или null). Правило в system prompt:
+JSON-схема включает два поля напоминаний:
 
-```
-Ставь ТОЛЬКО если:
-  - есть deadline
-  - priority = high или urgent
-Иначе — null.
+- `remind_before_deadline_minutes: int|null` — для Типа А (задача с дедлайном).
+- `reminder_interval_minutes: int|null` — для Типа Б (задача без дедлайна).
 
-Рекомендации:
-  - urgent + дедлайн сегодня → 30
-  - high + дедлайн сегодня → 60
-  - high + дедлайн завтра+ → 120
-  - urgent + дедлайн завтра+ → 60
-  - Если estimated_minutes > 60 — увеличь, чтобы успеть начать
-```
+Правила в system prompt (суть):
 
-В `ParsedTaskDTO::$remindBeforeDeadlineMinutes` + поле санитизируется в `TaskParser::parseResponse` (не ставим если нет deadline или приоритет medium/low — даже если AI проигнорировал правило).
+**remind_before_deadline_minutes**:
+- Если пользователь явно просит («напомни мне за час») — ВСЕГДА ставь, независимо от priority.
+- Иначе авто-ставь при `deadline + priority ∈ (high, urgent)` с разумными дефолтами.
 
-Прокидывается в Task через `FreeTextHandler` и `CreateTaskTool`.
+**reminder_interval_minutes**:
+- Если явная просьба («пинай каждые 2 часа») — ставь интервал из запроса.
+- Иначе авто-ставь только для задачи **без дедлайна** с priority urgent (180 мин) или high (360–720 мин).
+- Минимум — 60 минут. «Каждые 5 минут» → поднимаем до 60, упоминаем в notes.
+- НЕ ставь если у задачи есть дедлайн (она обслуживается Типом А).
 
-## TODO (5.2+)
+Санитизация в `TaskParser::parseResponse`:
+- `remindBeforeDeadlineMinutes` принимается если `> 0 && deadline != null`.
+- `reminderIntervalMinutes` принимается если `> 0`, с floor до 60.
 
-- **Разбуживание SNOOZED**: отдельный Schedule или расширение существующего для задач с `snoozedUntil <= now`.
-- **Периодические напоминания**: `reminderIntervalMinutes` + `lastRemindedAt` — каждые N минут для залипших задач.
+Оба поля прокидываются в Task через `FreeTextHandler` и `CreateTaskTool`.
+
+## TODO
+
 - **Per-user quiet hours настройка через ассистента** — сейчас глобальный дефолт 22→8, хочется natural language «не беспокой меня после 10».
 - **Отдельная сущность `Reminder`**: для множественных напоминаний по одной задаче (за 2 часа + за 30 минут), а не одно поле `remindBeforeDeadlineMinutes`.
 - **Учёт `isBlocked()`** — не напоминать о дедлайне задачи, которая сейчас всё равно заблокирована другой. Сложнее — но улучшает UX.

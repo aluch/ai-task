@@ -58,6 +58,9 @@ class FreeTextHandler
         if ($dto->remindBeforeDeadlineMinutes !== null) {
             $task->setRemindBeforeDeadlineMinutes($dto->remindBeforeDeadlineMinutes);
         }
+        if ($dto->reminderIntervalMinutes !== null) {
+            $task->setReminderIntervalMinutes($dto->reminderIntervalMinutes);
+        }
         $task->setSource(TaskSource::AI_PARSED);
         $task->setSourceRef((string) ($bot->message()?->message_id ?? ''));
 
@@ -77,6 +80,7 @@ class FreeTextHandler
             'deadline' => $task->getDeadline()?->format('c'),
             'priority' => $task->getPriority()->value,
             'remind_before_deadline_minutes' => $task->getRemindBeforeDeadlineMinutes(),
+            'reminder_interval_minutes' => $task->getReminderIntervalMinutes(),
         ]);
 
         $bot->sendMessage(text: $this->formatResponse($task, $dto, $user));

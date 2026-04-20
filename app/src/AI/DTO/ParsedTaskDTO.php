@@ -20,6 +20,7 @@ final readonly class ParsedTaskDTO
         public array $contextCodes = [],
         public ?string $parserNotes = null,
         public ?int $remindBeforeDeadlineMinutes = null,
+        public ?int $reminderIntervalMinutes = null,
     ) {
     }
 }
