@@ -246,7 +246,19 @@ bot:
 - `App\AI\ClaudeClient` — обёртка вокруг Symfony HttpClient для Anthropic Messages API. Классифицирует ошибки: `ClaudeClientException` (4xx), `ClaudeTransientException` (5xx/сеть), `ClaudeRateLimitException` (429). Логирует каждый вызов: модель, tokens, elapsed.
 - `App\AI\TaskParser` — превращает свободный текст в `ParsedTaskDTO`. System prompt содержит текущее время пользователя, его timezone и список контекстов из БД. Ответ — JSON, парсится с fallback.
 - `App\AI\TaskAdvisor` — подбирает оптимальный набор задач под свободное время и контекст (для команды `/free`). Отличается от парсера: не извлечение, а рассуждение (приоритеты, маршруты, группировка). Используется Sonnet вместо Haiku. Подробности — `docs/architecture/task-advisor.md`.
-- `App\AI\Assistant` — AI-ассистент через tool calling. Обрабатывает свободный текст в Telegram через `AssistantHandler`, выбирает нужный tool (create_task/list_tasks/mark_task_done/snooze_task) на основе намерения пользователя, исполняет и отвечает по-человечески. Tool use loop до 5 итераций. Подробности — `docs/architecture/assistant.md`.
+- `App\AI\Assistant` — AI-ассистент через tool calling. Обрабатывает свободный текст в Telegram через `AssistantHandler`, выбирает нужный tool на основе намерения пользователя, исполняет и отвечает по-человечески. Tool use loop до 5 итераций, retry на rate-limit/5xx от Anthropic. Подробности — `docs/architecture/assistant.md`.
+
+  Доступные tools (10 штук, все автоконфигурируются по тегу `app.assistant_tool`):
+  - `create_task` — с защитой от дубликатов (корни ≥50% совпадают → success=false), обход через `force=true`.
+  - `list_tasks` — фильтры по статусу + query.
+  - `search_tasks_by_title` — fuzzy-поиск с морфо-стеммингом.
+  - `update_task` — любое поле задачи; при смене дедлайна/remind_before сбрасывает `deadline_reminder_sent_at`.
+  - `mark_task_done`, `snooze_task`.
+  - `add_reminder_to_task` — remind_before_deadline_minutes или reminder_interval_minutes (клампится к 60).
+  - `block_task` / `unblock_task` — с проверкой циклов.
+  - `suggest_tasks` — вызов TaskAdvisor (аналог /free, но только текст без кнопок).
+
+  После любых изменений в Ассистенте или tools — `make smoke-all` (14 сценариев). В `smoke:all` есть `sleep(8)` между assistant-сценариями, чтобы не упираться в 30k TPM Anthropic rate-limit.
 - `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
 - `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
 - `App\AI\DTO\TaskSuggestionDTO` + `SuggestedTask` — DTO подборки задач (suggestions, reasoning, totalEstimatedMinutes, noMatchReason).

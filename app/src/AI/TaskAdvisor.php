@@ -7,6 +7,8 @@ namespace App\AI;
 use App\AI\DTO\ClaudeResponse;
 use App\AI\DTO\SuggestedTask;
 use App\AI\DTO\TaskSuggestionDTO;
+use App\AI\Exception\ClaudeRateLimitException;
+use App\AI\Exception\ClaudeTransientException;
 use App\Entity\Task;
 use App\Entity\User;
 use Psr\Log\LoggerInterface;
@@ -50,17 +52,47 @@ class TaskAdvisor
 
         $userPrompt = $this->buildUserPrompt($tasks, $now, $userTz);
 
-        $response = $this->claude->createMessage(
-            systemPrompt: $systemPrompt,
-            messages: [['role' => 'user', 'content' => $userPrompt]],
-            model: $this->model,
-            maxTokens: 2048,
-            temperature: 0.3,
-        );
+        $response = $this->callWithRetry($systemPrompt, $userPrompt);
 
         $validIds = array_map(fn (Task $t) => $t->getId()->toRfc4122(), $tasks);
 
         return $this->parseResponse($response, $validIds, $availableMinutes);
+    }
+
+    /**
+     * Retry на 429/5xx от Anthropic — до 3 попыток. Клиентские 4xx не повторяем.
+     */
+    private function callWithRetry(string $systemPrompt, string $userPrompt): ClaudeResponse
+    {
+        $maxAttempts = 3;
+        $last = null;
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                return $this->claude->createMessage(
+                    systemPrompt: $systemPrompt,
+                    messages: [['role' => 'user', 'content' => $userPrompt]],
+                    model: $this->model,
+                    maxTokens: 2048,
+                    temperature: 0.3,
+                );
+            } catch (ClaudeRateLimitException $e) {
+                $last = $e;
+                $wait = $e->retryAfter ?? 5;
+                $this->logger->warning('TaskAdvisor rate limited', ['wait' => $wait, 'attempt' => $attempt]);
+                if ($attempt < $maxAttempts) {
+                    sleep($wait);
+                }
+            } catch (ClaudeTransientException $e) {
+                $last = $e;
+                $wait = $attempt;
+                $this->logger->warning('TaskAdvisor transient, retrying', ['wait' => $wait, 'attempt' => $attempt, 'error' => $e->getMessage()]);
+                if ($attempt < $maxAttempts) {
+                    sleep($wait);
+                }
+            }
+        }
+
+        throw $last;
     }
 
     private function buildSystemPrompt(

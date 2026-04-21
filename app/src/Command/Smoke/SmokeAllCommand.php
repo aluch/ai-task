@@ -33,7 +33,8 @@ final class SmokeAllCommand extends Command
         $failed = 0;
         $passed = 0;
 
-        foreach ($this->runner->names() as $name) {
+        $names = $this->runner->names();
+        foreach ($names as $i => $name) {
             $result = $this->runner->run($name);
             if ($result->passed) {
                 $passed++;
@@ -41,6 +42,16 @@ final class SmokeAllCommand extends Command
             } else {
                 $failed++;
                 $io->writeln(sprintf('❌ %s (%.1fs): %s', $result->name, $result->elapsedSeconds, $result->message));
+            }
+
+            // Между assistant-сценариями ждём — иначе упираемся в 30k TPM
+            // лимит Anthropic (Sonnet-вызовы тяжёлые). reminder-сценарии
+            // API не дёргают, паузы не нужны.
+            $nextName = $names[$i + 1] ?? null;
+            $isAssistantNext = $nextName !== null && str_starts_with($nextName, 'assistant-');
+            $isAssistantCurrent = str_starts_with($name, 'assistant-');
+            if ($isAssistantCurrent && $isAssistantNext) {
+                sleep(8);
             }
         }
 

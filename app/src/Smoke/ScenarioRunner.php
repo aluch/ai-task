@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Smoke;
 
+use App\AI\Assistant;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Enum\TaskPriority;
@@ -12,7 +13,6 @@ use App\Enum\TaskStatus;
 use App\Notification\ReminderSender;
 use App\Notification\SendResult;
 use Doctrine\Persistence\ManagerRegistry;
-use Symfony\Component\Uid\Uuid;
 
 /**
  * Набор сценарных smoke-тестов для reminder pipeline. Каждый сценарий:
@@ -34,8 +34,10 @@ final class ScenarioRunner
         private readonly SmokeHarness $harness,
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
+        private readonly Assistant $assistant,
     ) {
         $this->scenarios = [
+            // reminder-пайплайн
             'deadline-short' => fn () => $this->deadlineShort(),
             'deadline-quiet-hours' => fn () => $this->deadlineQuietHours(),
             'deadline-recently-active' => fn () => $this->deadlineRecentlyActive(),
@@ -44,6 +46,13 @@ final class ScenarioRunner
             'periodic-in-progress-doubled' => fn () => $this->periodicInProgressDoubled(),
             'snooze-wakeup-success' => fn () => $this->snoozeWakeupSuccess(),
             'snooze-wakeup-quiet-hours' => fn () => $this->snoozeWakeupQuietHours(),
+            // Assistant — тут дергаем реальный Claude API, медленнее
+            'assistant-basic-flow' => fn () => $this->assistantBasicFlow(),
+            'assistant-update-task' => fn () => $this->assistantUpdateTask(),
+            'assistant-duplicate-prevention' => fn () => $this->assistantDuplicatePrevention(),
+            'assistant-mark-done-ambiguous' => fn () => $this->assistantMarkDoneAmbiguous(),
+            'assistant-block-tasks' => fn () => $this->assistantBlockTasks(),
+            'assistant-suggest-tasks' => fn () => $this->assistantSuggestTasks(),
         ];
     }
 
@@ -335,6 +344,252 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('snooze-wakeup-quiet-hours', 0);
+    }
+
+    // ============================================================
+    // Assistant-сценарии. Тут реально дергается Claude API — 2-5s
+    // на каждый Assistant::handle.
+    // ============================================================
+
+    /**
+     * Guard: минимальный поток создать → показать → закрыть → показать.
+     * Если этот сценарий ломается — остальная логика Ассистента под угрозой.
+     */
+    private function assistantBasicFlow(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        // 1. create
+        $this->runAssistant($user, 'Купить молоко');
+        $tasks = $this->userTasks($user);
+        if (count($tasks) !== 1) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'ожидалась 1 созданная задача, получено ' . count($tasks));
+        }
+        if (mb_stripos($tasks[0]->getTitle(), 'молок') === false) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'title не содержит «молок»: ' . $tasks[0]->getTitle());
+        }
+
+        // 2. list — в ответе должно упоминаться «молоко»
+        $r = $this->runAssistant($user, 'Что у меня есть?');
+        if (mb_stripos($r->replyText, 'молок') === false) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'list-ответ не упоминает «молок»: ' . mb_substr($r->replyText, 0, 120));
+        }
+
+        // 3. done
+        $this->runAssistant($user, 'Молоко купил');
+        $doneTasks = $this->userTasks($user, [TaskStatus::DONE]);
+        if (count($doneTasks) !== 1) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'задача не перешла в DONE, done-count=' . count($doneTasks));
+        }
+
+        // 4. empty list — проверяем что активных нет
+        $r2 = $this->runAssistant($user, 'Что у меня есть?');
+        $activeAfter = $this->userTasks($user);
+        if ($activeAfter !== []) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'после done активные остались: ' . count($activeAfter));
+        }
+        // reply на «что у меня есть» при пустом списке — проверяем что он не
+        // упоминает «молок», а скорее «нет задач»/пусто.
+        if (mb_stripos($r2->replyText, 'молок') !== false) {
+            return ScenarioResult::fail('assistant-basic-flow', 0, 'empty-reply всё ещё упоминает «молок»');
+        }
+
+        return ScenarioResult::pass('assistant-basic-flow', 0);
+    }
+
+    private function assistantUpdateTask(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        // Создаём задачу без дедлайна. Используем одно и то же корневое
+        // слово в создании и апдейте — fuzzy-поиск по корню «стрижк»
+        // найдёт, даже если пользователь скажет «стрижка» vs «стрижку».
+        $this->runAssistant($user, 'Записаться на стрижку в бербершоп');
+        $tasks = $this->userTasks($user);
+        if (count($tasks) !== 1) {
+            return ScenarioResult::fail('assistant-update-task', 0, 'create: ожидалась 1 задача, получено ' . count($tasks));
+        }
+        $taskId = $tasks[0]->getId();
+
+        // Проставляем deadline_reminder_sent_at руками, чтобы проверить что
+        // апдейт дедлайна его сбрасывает.
+        $tasks[0]->setDeadlineReminderSentAt(new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
+        $this->doctrine->getManager()->flush();
+
+        // Просим обновить — слово «стрижк» найдётся через fuzzy-search.
+        $r = $this->runAssistant($user, 'Перенеси стрижку на завтра 14:00');
+        $fresh = $this->doctrine->getManager()->getRepository(Task::class)->find($taskId);
+        if ($fresh === null) {
+            return ScenarioResult::fail('assistant-update-task', 0, 'задача исчезла');
+        }
+        if ($fresh->getDeadline() === null) {
+            return ScenarioResult::fail('assistant-update-task', 0, 'update не проставил дедлайн. reply=' . mb_substr($r->replyText, 0, 120));
+        }
+        if ($fresh->getDeadlineReminderSentAt() !== null) {
+            return ScenarioResult::fail('assistant-update-task', 0, 'deadlineReminderSentAt должен был сброситься');
+        }
+        // убеждаемся что не создалась вторая задача
+        $all = $this->userTasks($user);
+        if (count($all) !== 1) {
+            return ScenarioResult::fail('assistant-update-task', 0, 'создана лишняя задача вместо обновления, count=' . count($all));
+        }
+
+        return ScenarioResult::pass('assistant-update-task', 0);
+    }
+
+    /**
+     * Создаём «Купить молоко», второй раз просим «купить молоко» — ассистент
+     * должен заметить дубликат. Критерий: не должно появиться 2 задачи
+     * с «молок» в активных.
+     */
+    private function assistantDuplicatePrevention(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $this->runAssistant($user, 'Купить молоко');
+        $this->runAssistant($user, 'Купи молоко');
+
+        $active = $this->userTasks($user);
+        $dupCount = 0;
+        foreach ($active as $t) {
+            if (mb_stripos($t->getTitle(), 'молок') !== false) {
+                $dupCount++;
+            }
+        }
+        if ($dupCount > 1) {
+            return ScenarioResult::fail('assistant-duplicate-prevention', 0, "создано {$dupCount} задач с «молок», ожидалась 1");
+        }
+
+        return ScenarioResult::pass('assistant-duplicate-prevention', 0);
+    }
+
+    /**
+     * Две задачи с «звонк», сообщение «звонок сделал» неоднозначное —
+     * ни одна задача НЕ должна быть DONE, в reply — уточняющий вопрос.
+     */
+    private function assistantMarkDoneAmbiguous(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        // force-create обе (обходим duplicate-prevention, если они уже с
+        // разными title'ами — duplicate не сработает; делаем через
+        // прямой persist для надёжности)
+        $em = $this->doctrine->getManager();
+        $t1 = new Task($user, 'Позвонить Петру про звонок в страховую');
+        $t2 = new Task($user, 'Сделать звонок в банк');
+        $em->persist($t1);
+        $em->persist($t2);
+        $em->flush();
+
+        $r = $this->runAssistant($user, 'Звонок сделал');
+        $done = $this->userTasks($user, [TaskStatus::DONE]);
+        if ($done !== []) {
+            return ScenarioResult::fail('assistant-mark-done-ambiguous', 0, 'одна из задач ошибочно закрыта — должен был уточнить');
+        }
+        // Ожидаем что ассистент спросит. Простой эвристический маркер: «?» в reply.
+        if (mb_strpos($r->replyText, '?') === false) {
+            return ScenarioResult::fail('assistant-mark-done-ambiguous', 0, 'ожидался уточняющий вопрос, reply=' . mb_substr($r->replyText, 0, 150));
+        }
+
+        return ScenarioResult::pass('assistant-mark-done-ambiguous', 0);
+    }
+
+    /**
+     * Создаём 2 задачи, просим связать через block. Проверяем что
+     * «вторая» → $blockedBy содержит «первую».
+     */
+    private function assistantBlockTasks(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $em = $this->doctrine->getManager();
+        $blocker = new Task($user, 'Снять наличку');
+        $blocked = new Task($user, 'Купить билеты на концерт');
+        $em->persist($blocker);
+        $em->persist($blocked);
+        $em->flush();
+
+        $r = $this->runAssistant(
+            $user,
+            'Чтобы купить билеты на концерт нужно сначала снять наличку — свяжи эти задачи',
+        );
+
+        $em->refresh($blocked);
+        if (count($blocked->getActiveBlockers()) !== 1) {
+            return ScenarioResult::fail('assistant-block-tasks', 0, 'связь не создана. reply=' . mb_substr($r->replyText, 0, 150));
+        }
+
+        return ScenarioResult::pass('assistant-block-tasks', 0);
+    }
+
+    /**
+     * Создаём пару задач с разными эстимейтами. Просим посоветовать при
+     * доступном времени — ожидаем вызов suggest_tasks и хоть одну задачу
+     * в reply.
+     */
+    private function assistantSuggestTasks(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $em = $this->doctrine->getManager();
+        $t1 = new Task($user, 'Помыть посуду');
+        $t1->setEstimatedMinutes(20);
+        $t2 = new Task($user, 'Разобрать почту');
+        $t2->setEstimatedMinutes(30);
+        $em->persist($t1);
+        $em->persist($t2);
+        $em->flush();
+
+        $r = $this->runAssistant($user, 'Я дома, свободен минут 40 — что сделать?');
+
+        if (!in_array('suggest_tasks', $r->toolsCalled, true)) {
+            return ScenarioResult::fail('assistant-suggest-tasks', 0, 'tool suggest_tasks не вызван, вызваны: ' . implode(',', $r->toolsCalled));
+        }
+
+        // reply должен упомянуть хотя бы одну из задач
+        $mentionsAny = mb_stripos($r->replyText, 'посуд') !== false
+            || mb_stripos($r->replyText, 'почт') !== false;
+        if (!$mentionsAny) {
+            return ScenarioResult::fail('assistant-suggest-tasks', 0, 'reply не упоминает ни одну из задач');
+        }
+
+        return ScenarioResult::pass('assistant-suggest-tasks', 0);
+    }
+
+    private function setupFreshAssistant(): User
+    {
+        $this->harness->reset();
+        $this->harness->notifier()->clear();
+        $user = $this->harness->ensureTestUser();
+        // реалистичный now, не quiet hours
+        $this->harness->freezeTimeAt(new \DateTimeImmutable('2026-06-15 12:00:00 UTC'));
+
+        return $user;
+    }
+
+    private function runAssistant(User $user, string $message): \App\AI\DTO\AssistantResult
+    {
+        $now = $this->harness->clock()?->now() ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        return $this->assistant->handle($user, $message, $now);
+    }
+
+    /**
+     * @param TaskStatus[]|null $statuses
+     * @return Task[]
+     */
+    private function userTasks(User $user, ?array $statuses = null): array
+    {
+        $statuses ??= [TaskStatus::PENDING, TaskStatus::IN_PROGRESS];
+        $qb = $this->doctrine->getManager()
+            ->getRepository(Task::class)
+            ->createQueryBuilder('t')
+            ->andWhere('t.user = :u')
+            ->andWhere('t.status IN (:s)')
+            ->setParameter('u', $user)
+            ->setParameter('s', $statuses);
+
+        return $qb->getQuery()->getResult();
     }
 
     /**
