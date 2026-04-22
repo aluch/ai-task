@@ -598,15 +598,18 @@ final class ScenarioRunner
 
     /**
      * Создаём «Купить молоко», второй раз просим «купить молоко» — ассистент
-     * должен заметить дубликат. Критерий: не должно появиться 2 задачи
-     * с «молок» в активных.
+     * должен заметить точный дубликат. Критерии:
+     *  - не должно появиться 2 задачи с «молок» в активных,
+     *  - reply НЕ должен содержать уточняющих вопросов вида
+     *    «создать новую или обновить / подтверди / уточни» — у ассистента
+     *    нет памяти между сообщениями, такие вопросы бессмысленны.
      */
     private function assistantDuplicatePrevention(): ScenarioResult
     {
         $user = $this->setupFreshAssistant();
 
         $this->runAssistant($user, 'Купить молоко');
-        $this->runAssistant($user, 'Купи молоко');
+        $r2 = $this->runAssistant($user, 'Купи молоко');
 
         $active = $this->userTasks($user);
         $dupCount = 0;
@@ -619,20 +622,37 @@ final class ScenarioRunner
             return ScenarioResult::fail('assistant-duplicate-prevention', 0, "создано {$dupCount} задач с «молок», ожидалась 1");
         }
 
+        // Проверяем что ассистент не оставил пользователя в ожидании ответа
+        // на вопрос. Ищем именно фразы-ожидания «подтверди?», «создать или
+        // обновить?», «какую именно?», «создавать всё-таки?». Слова типа
+        // «уточни» допустимы в смысле «уточни в следующем сообщении если
+        // нужно другое» — это подсказка к новой команде, не вопрос.
+        $forbidden = ['подтверди', 'создать новую или', 'новую или обнов', 'обновить или созд', 'какую именно', 'создавать всё', 'создать всё', 'создать всё-таки'];
+        $replyLc = mb_strtolower($r2->replyText);
+        foreach ($forbidden as $phrase) {
+            if (mb_strpos($replyLc, $phrase) !== false) {
+                return ScenarioResult::fail(
+                    'assistant-duplicate-prevention',
+                    0,
+                    "reply содержит запрещённую уточняющую фразу «{$phrase}»: " . mb_substr($r2->replyText, 0, 180),
+                );
+            }
+        }
+
         return ScenarioResult::pass('assistant-duplicate-prevention', 0);
     }
 
     /**
      * Две задачи с «звонк», сообщение «звонок сделал» неоднозначное —
-     * ни одна задача НЕ должна быть DONE, в reply — уточняющий вопрос.
+     * ни одна задача НЕ должна быть DONE. Ассистент не должен гадать,
+     * а показать оба варианта в reply — подсказка чтобы пользователь
+     * переформулировал следующим сообщением (но без «?»-ожидания,
+     * см. правило «нет памяти между сообщениями»).
      */
     private function assistantMarkDoneAmbiguous(): ScenarioResult
     {
         $user = $this->setupFreshAssistant();
 
-        // force-create обе (обходим duplicate-prevention, если они уже с
-        // разными title'ами — duplicate не сработает; делаем через
-        // прямой persist для надёжности)
         $em = $this->doctrine->getManager();
         $t1 = new Task($user, 'Позвонить Петру про звонок в страховую');
         $t2 = new Task($user, 'Сделать звонок в банк');
@@ -643,11 +663,19 @@ final class ScenarioRunner
         $r = $this->runAssistant($user, 'Звонок сделал');
         $done = $this->userTasks($user, [TaskStatus::DONE]);
         if ($done !== []) {
-            return ScenarioResult::fail('assistant-mark-done-ambiguous', 0, 'одна из задач ошибочно закрыта — должен был уточнить');
+            return ScenarioResult::fail('assistant-mark-done-ambiguous', 0, 'одна из задач ошибочно закрыта — должен был показать оба варианта');
         }
-        // Ожидаем что ассистент спросит. Простой эвристический маркер: «?» в reply.
-        if (mb_strpos($r->replyText, '?') === false) {
-            return ScenarioResult::fail('assistant-mark-done-ambiguous', 0, 'ожидался уточняющий вопрос, reply=' . mb_substr($r->replyText, 0, 150));
+        // Оба варианта должны быть упомянуты: «страховую» и «банк» — хотя бы
+        // фрагментом. Иначе ассистент утаил неоднозначность.
+        $replyLc = mb_strtolower($r->replyText);
+        $mentionsStrahov = mb_strpos($replyLc, 'страхов') !== false;
+        $mentionsBank = mb_strpos($replyLc, 'банк') !== false;
+        if (!$mentionsStrahov || !$mentionsBank) {
+            return ScenarioResult::fail(
+                'assistant-mark-done-ambiguous',
+                0,
+                'оба варианта должны быть в reply (страховая + банк). reply=' . mb_substr($r->replyText, 0, 180),
+            );
         }
 
         return ScenarioResult::pass('assistant-mark-done-ambiguous', 0);

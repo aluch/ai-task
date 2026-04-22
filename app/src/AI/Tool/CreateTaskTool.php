@@ -35,11 +35,18 @@ class CreateTaskTool implements AssistantTool
         приоритет, контексты) из исходного текста — TaskParser сделает это автоматически.
         Передавай raw_text = полный текст пользователя с описанием задачи.
 
-        Защита от дубликатов: перед созданием делается проверка на похожую активную
-        задачу по первым значимым словам. Если нашлась — вернётся success=false со
-        списком совпадений, и тебе нужно спросить у пользователя — создать новую или
-        использовать update_task для существующей. Чтобы явно создать несмотря на
-        похожие — передай force=true.
+        Защита от дубликатов (автоматическая, вопросов пользователю не задавай):
+        - Точный дубликат (title идентичен активной задаче, case-insensitive) — НЕ
+          создаётся. Tool вернёт success=true, но content начнётся с «DUPLICATE_SKIPPED».
+          В этом случае: в reply ЧЁТКО сообщи что задача уже есть, НЕ пиши «готово»,
+          «создал», «добавил» — ничего не создавалось. Пример: «Такая задача уже
+          есть. Если хотел отдельную (например "молоко на даче") — напиши с уточнением».
+        - Похожие, но не идентичные (отличается уточнением: «молоко» vs «молоко на
+          даче») — создаётся новая задача, в content будут упомянуты похожие.
+          Передай пользователю что создал, и что похожие уже были — пусть сам решит
+          в следующем сообщении если захочет объединить.
+        - `force=true` отключает проверку на точный дубликат (создаст даже при совпадении
+          title). Используй только если пользователь явно подтвердил в текущем сообщении.
         DESC;
     }
 
@@ -72,20 +79,25 @@ class CreateTaskTool implements AssistantTool
         $dto = $this->taskParser->parse($rawText, $user, $now);
 
         $em = $this->doctrine->getManager();
-
         $force = (bool) ($input['force'] ?? false);
-        if (!$force) {
-            $dup = $this->findDuplicates($user, $dto->title);
-            if ($dup !== []) {
-                $lines = [
-                    "Уже есть похожие активные задачи по «{$dto->title}»:",
-                ];
-                foreach ($dup as $t) {
-                    $lines[] = "- [id:{$t->getId()->toRfc4122()}] {$t->getTitle()} ({$t->getStatus()->value})";
-                }
-                $lines[] = 'Уточни у пользователя: создать новую (передай force=true), обновить существующую (update_task) или просто показать старую?';
 
-                return ToolResult::error(implode("\n", $lines));
+        // Проверка на дубликаты — даже если force=true, всё равно находим
+        // exact-совпадение по title (case-insensitive), чтобы не плодить
+        // одинаковые задачи. force снимает только проверку по похожим.
+        $exact = null;
+        $similar = [];
+        if (!$force) {
+            [$exact, $similar] = $this->findDuplicatesSplit($user, $dto->title);
+            if ($exact !== null) {
+                return ToolResult::ok(
+                    "DUPLICATE_SKIPPED: задача «{$exact->getTitle()}» уже есть в активных "
+                    . "(id:{$exact->getId()->toRfc4122()}, статус: {$exact->getStatus()->value}). "
+                    . 'Новая задача НЕ создана. Сообщи пользователю что такая задача уже есть, '
+                    . 'и что если он хотел новую с уточнением (например «на даче») — пусть напишет '
+                    . 'следующим сообщением с этим уточнением. НЕ пиши «готово», «создал», '
+                    . '«добавил» — ничего не создавалось.',
+                    ['created' => false],
+                );
             }
         }
 
@@ -143,24 +155,53 @@ class CreateTaskTool implements AssistantTool
             $parts[] = 'контексты: ' . implode(', ', $dto->contextCodes);
         }
 
+        $content = implode(', ', $parts);
+        if ($similar !== []) {
+            $simLines = ["Info для reply: уже существуют похожие (не идентичные) задачи:"];
+            foreach ($similar as $t) {
+                $simLines[] = "- [id:{$t->getId()->toRfc4122()}] {$t->getTitle()}";
+            }
+            $simLines[] = 'В reply КОНСТАТИРУЙ что создал новую и что есть похожие — НЕ задавай '
+                . 'вопросов «это одна задача или разные?» / «нужно ли объединить?». У тебя '
+                . 'нет памяти, ответ пользователя на такой вопрос ты не увидишь в контексте. '
+                . 'Если захочет объединить — сам напишет «удали задачу X» или «обнови X».';
+            $content .= "\n\n" . implode("\n", $simLines);
+        }
+
         return ToolResult::ok(
-            implode(', ', $parts),
-            ['task_id' => $task->getId()->toRfc4122()],
+            $content,
+            ['task_id' => $task->getId()->toRfc4122(), 'created' => true],
         );
     }
 
     /**
-     * Быстрая эвристика дубликата: берём 2-3 значимых слова из title
-     * (отсеиваем короткие и типовые глаголы/предлоги), ищем активные
-     * задачи с ILIKE по каждому корню. Совпадение ≥2 слов → кандидат.
+     * Разделяет кандидатов на точный дубликат (title идентичен
+     * case-insensitive — ровно один, если есть) и похожие (совпадает
+     * ≥ половины keywords). Exact-дубликат → «не создавать», похожие →
+     * «создавать, но упомянуть».
      *
-     * @return Task[]
+     * @return array{0: Task|null, 1: Task[]} [exact, similar]
      */
-    private function findDuplicates(User $user, string $title): array
+    private function findDuplicatesSplit(User $user, string $title): array
     {
+        $titleLc = mb_strtolower(trim($title));
+
         $keywords = $this->extractKeywords($title);
         if ($keywords === []) {
-            return [];
+            // title без значимых слов — только exact-проверка по полному тексту
+            $em = $this->doctrine->getManager();
+            $exact = $em->getRepository(Task::class)->createQueryBuilder('t')
+                ->andWhere('t.user = :user')
+                ->andWhere('t.status IN (:open)')
+                ->andWhere('LOWER(t.title) = :title')
+                ->setParameter('user', $user)
+                ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS, TaskStatus::SNOOZED])
+                ->setParameter('title', $titleLc)
+                ->setMaxResults(1)
+                ->getQuery()
+                ->getOneOrNullResult();
+
+            return [$exact, []];
         }
 
         $em = $this->doctrine->getManager();
@@ -170,8 +211,6 @@ class CreateTaskTool implements AssistantTool
             ->setParameter('user', $user)
             ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS, TaskStatus::SNOOZED]);
 
-        // Если только одно значимое слово — требуем его совпадение.
-        // Если два+ — любое совпадение кандидата + проверка на количество.
         $orParts = [];
         foreach ($keywords as $i => $kw) {
             $orParts[] = "LOWER(t.title) LIKE :kw{$i}";
@@ -181,30 +220,27 @@ class CreateTaskTool implements AssistantTool
 
         $candidates = $qb->getQuery()->getResult();
 
-        if (count($keywords) === 1) {
-            return $candidates;
-        }
-
-        // Для многословных title: требуем что у кандидата совпадает
-        // минимум половина keywords (округл. вверх) — так «Купить молоко»
-        // и «Купить бумагу» не слипнутся, а «Купить молока в магазине»
-        // и «купить молоко» — да.
-        $needHits = (int) ceil(count($keywords) / 2);
-        $filtered = [];
+        $exact = null;
+        $similar = [];
+        $needHits = max(1, (int) ceil(count($keywords) / 2));
         foreach ($candidates as $c) {
-            $titleLc = mb_strtolower($c->getTitle());
+            $cTitleLc = mb_strtolower($c->getTitle());
+            if ($cTitleLc === $titleLc) {
+                $exact = $c;
+                continue;
+            }
             $hits = 0;
             foreach ($keywords as $kw) {
-                if (mb_strpos($titleLc, $kw) !== false) {
+                if (mb_strpos($cTitleLc, $kw) !== false) {
                     $hits++;
                 }
             }
             if ($hits >= $needHits) {
-                $filtered[] = $c;
+                $similar[] = $c;
             }
         }
 
-        return $filtered;
+        return [$exact, $similar];
     }
 
     /**
