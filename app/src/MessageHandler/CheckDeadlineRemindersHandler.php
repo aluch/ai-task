@@ -25,6 +25,23 @@ final class CheckDeadlineRemindersHandler
 
     public function __invoke(CheckDeadlineRemindersMessage $message): void
     {
+        try {
+            $this->tick();
+        } catch (\Throwable $e) {
+            // Messenger поймает и залогирует тоже — но наш critical содержит
+            // имя handler'а и now в UTC, проще найти в логах по паттерну.
+            $this->logger->critical('Deadline reminder handler failed', [
+                'handler' => self::class,
+                'now' => $this->clock->now()->format('c'),
+                'error' => $e->getMessage(),
+                'exception' => $e,
+            ]);
+            throw $e;
+        }
+    }
+
+    private function tick(): void
+    {
         $em = $this->doctrine->getManager();
         $repo = $em->getRepository(Task::class);
         $now = $this->clock->now();

@@ -38,6 +38,21 @@ final class CheckSnoozeWakeupsHandler
 
     public function __invoke(CheckSnoozeWakeupsMessage $message): void
     {
+        try {
+            $this->tick();
+        } catch (\Throwable $e) {
+            $this->logger->critical('Snooze wakeup handler failed', [
+                'handler' => self::class,
+                'now' => $this->clock->now()->format('c'),
+                'error' => $e->getMessage(),
+                'exception' => $e,
+            ]);
+            throw $e;
+        }
+    }
+
+    private function tick(): void
+    {
         $em = $this->doctrine->getManager();
         $repo = $em->getRepository(Task::class);
         $now = $this->clock->now();

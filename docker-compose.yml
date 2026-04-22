@@ -83,16 +83,19 @@ services:
   scheduler:
     <<: *php-service
     container_name: ai-task-scheduler
-    # APP_ENV=prod критично: в dev-окружении Symfony подключает
-    # TraceableEventDispatcher, который ломается в Messenger worker loop
-    # с ошибкой «Undefined array key Symfony\Component\Messenger\Event\
-    # WorkerRunningEvent» в TraceableEventDispatcher.php:274 → воркер
-    # падает с exit 1 после каждого тика. prod profiler/tracer не
-    # подключает, обработка идёт чисто.
+    # APP_ENV=dev, APP_DEBUG=0: dev-окружение автоматически инвалидирует
+    # DI-кэш при изменениях в коде (новые конструкторы подхватываются без
+    # ручного cache:clear), а debug=0 отключает TraceableEventDispatcher,
+    # из-за которого в Symfony 7.4 падал messenger worker loop с
+    # «Undefined array key WorkerRunningEvent». Получаем лучшее из двух:
+    # свежий DI + чистая обработка событий.
     #
     # --time-limit=3600: воркер сам завершится через час, Docker
     # перезапустит — защита от утечек памяти в long-running процессе.
-    command: sh -c 'php bin/console cache:warmup --env=prod && APP_ENV=prod php bin/console messenger:consume scheduler_reminders --time-limit=3600'
+    environment:
+      APP_ENV: dev
+      APP_DEBUG: 0
+    command: php bin/console messenger:consume scheduler_reminders --time-limit=3600
     restart: on-failure
 
   adminer:

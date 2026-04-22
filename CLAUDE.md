@@ -35,6 +35,7 @@ Telegram-бот с интеграцией Claude API для управления
 - `make bot-restart` — перезапуск бота
 - `make scheduler-logs` — логи scheduler-воркера (напоминания)
 - `make scheduler-restart` — перезапуск scheduler
+- `make cache-clear` — очистить `var/cache/prod/` (на случай prod-прогонов)
 - `make smoke-all` — прогнать все smoke-сценарии (8 штук). Подробности — `docs/testing/smoke.md`
 - `make smoke-reset` — удалить тестового пользователя (telegram_id=999999999)
 - `make smoke-assistant msg="..."` — разовый прогон Assistant от имени тест-юзера
@@ -59,6 +60,7 @@ Telegram-бот с интеграцией Claude API для управления
 - Открывающий тег — только `<?php`, закрывающий `?>` в чисто-PHP-файлах не ставить.
 - LF line endings, 4 пробела, одна пустая строка в конце файла.
 - **Время — всё в UTC.** В БД все datetime-поля — `TIMESTAMPTZ`, в коде создавать `\DateTimeImmutable` всегда с явной зоной UTC: `new \DateTimeImmutable('now', new \DateTimeZone('UTC'))`. Никаких `new \DateTimeImmutable()` без зоны — он подтянет `date.timezone` из php.ini (Europe/Tallinn) и сломает абсолютные моменты. Пользовательский ввод парсить в зоне юзера и `setTimezone('UTC')` перед сохранением. Конвертация в локальную зону — только на выводе (CLI/бот). Подробности — `docs/architecture/data-model.md`, секция «Работа со временем».
+- **Long-running контейнеры и Symfony окружение.** `bot` и `scheduler` запускаются в `APP_ENV=dev`. Для `scheduler` дополнительно выставлен `APP_DEBUG=0` — так DI-кэш инвалидируется автоматически при изменении кода (не надо помнить про `cache:clear`), а при `debug=0` не подключается `TraceableEventDispatcher`, у которого в Symfony 7.4 есть баг с `WorkerRunningEvent` → worker loop падает в каждом тике. **Не переключай scheduler на `prod` для локальной разработки** — это возвращает класс багов со stale DI-кэшем (см. инцидент 2026-04-22: скедулер тихо падал 30 часов после добавления Clock в конструктор ReminderSender). Если всё же переведёшь на prod — после любой правки конструктора/сервиса нужно `make cache-clear`.
 - **Long-running процессы и Doctrine.** В коде, который живёт дольше одного HTTP-запроса (Telegram-бот, Messenger воркеры, планировщик), **никогда не инжектить `EntityManagerInterface` напрямую** и **никогда не инжектить Doctrine-репозитории через конструктор**. Репозитории (`ServiceEntityRepository`) захватывают EM в свойство `$_em` при старте — после `$registry->resetManager()` внутри репо остаётся stale ссылка, find() возвращает сущность в identity map старого EM, а flush по текущему EM молча не пишет ничего. Правильный паттерн для любой работы с сущностями:
 
   ```php

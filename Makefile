@@ -1,6 +1,6 @@
 DC = docker compose
 
-.PHONY: up down restart build bash logs ps clean bot-logs bot-restart scheduler-logs scheduler-restart smoke-all smoke-reset smoke-assistant smoke-parser smoke-scenario smoke-tick
+.PHONY: up down restart build bash logs ps clean bot-logs bot-restart scheduler-logs scheduler-restart smoke-all smoke-reset smoke-assistant smoke-parser smoke-scenario smoke-tick cache-clear
 
 up:
 	$(DC) up -d
@@ -57,3 +57,9 @@ smoke-scenario:
 
 smoke-tick:
 	$(DC) exec --user 1000:1000 php php bin/console app:smoke:reminder-tick
+
+# Очистить prod-кэш во всех контейнерах. С 2026-04-22 scheduler/bot
+# работают в APP_ENV=dev и кэш не надо чистить вручную, но если на проде
+# будет prod-режим — команда пригодится.
+cache-clear:
+	$(DC) run --rm --user root --entrypoint sh php -c 'rm -rf /var/www/app/var/cache/prod'

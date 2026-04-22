@@ -25,6 +25,21 @@ final class CheckPeriodicRemindersHandler
 
     public function __invoke(CheckPeriodicRemindersMessage $message): void
     {
+        try {
+            $this->tick();
+        } catch (\Throwable $e) {
+            $this->logger->critical('Periodic reminder handler failed', [
+                'handler' => self::class,
+                'now' => $this->clock->now()->format('c'),
+                'error' => $e->getMessage(),
+                'exception' => $e,
+            ]);
+            throw $e;
+        }
+    }
+
+    private function tick(): void
+    {
         $em = $this->doctrine->getManager();
         $repo = $em->getRepository(Task::class);
         $now = $this->clock->now();
