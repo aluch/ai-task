@@ -83,6 +83,70 @@ DTO результата: `replyText`, `toolsCalled` (имена tools в пор
 
 Регистрируется на fallback для текста без `/`. Отправляет «🤔 Думаю...», вызывает Assistant, редактирует сообщение на ответ. Исключения ловит и редактирует на «⚠️ Что-то пошло не так».
 
+Дополнительно:
+- Детектирует Reply на бота: если `$message->reply_to_message->from->is_bot === true`, передаёт `msg_id` ответа в `Assistant::handle`.
+- После успешного прохождения Ассистента сохраняет оба сообщения (user + assistant) в `ConversationHistoryStore`. `telegramMsgId` ассистентского сообщения — это `message_id` от `sendMessage('🤔 Думаю...')`, т.к. `editMessageText` редактирует его inplace, id не меняется.
+
+### `App\Telegram\Handler\ResetHandler`
+
+`/reset` — вызывает `ConversationHistoryStore::clear($user)` и отвечает «🆕 Диалог сброшен.».
+
+## Память о диалоге (Redis)
+
+Ассистент помнит последние **10 сообщений** диалога, TTL **30 минут** с последней активности. Хранилище — `ConversationHistoryStore` на Redis. Схема:
+
+- **Ключ**: `conversation:<user_uuid>`
+- **Значение** (JSON):
+  ```json
+  {
+    "user_id": "019d...",
+    "messages": [
+      {"role":"user", "text":"...", "telegram_msg_id":123, "at":"...", "reply_to_msg_id":null, "tools_called":[]},
+      {"role":"assistant", "text":"...", "telegram_msg_id":124, "at":"...", "tools_called":["create_task"]}
+    ],
+    "last_activity_at": "..."
+  }
+  ```
+- **Sliding window**: при `append` если в истории уже 10 — выпадает самое старое.
+- **TTL**: 30 минут. Каждый `append` делает `SETEX ... 1800`. Молчит 30 минут — ключ исчезает автоматически.
+
+### Передача в Claude API
+
+`Assistant::handle` перед текущим user-сообщением раскладывает историю как `messages[]`:
+```
+[
+  {role: "user", content: "<прошлое сообщение>"},
+  {role: "assistant", content: "<прошлая реплика бота>"},
+  ...
+  {role: "user", content: "<context>Текущее время: ...</context>\n\n<текущий текст>"}
+]
+```
+
+`tool_use`/`tool_result` в историю **не сохраняются** — только финальные тексты. Это уменьшает размер и упрощает восприятие моделью.
+
+### Reply-механика
+
+Если пользователь сделал Telegram Reply на сообщение бота:
+1. `AssistantHandler` определяет `$reply_to_message->from->is_bot === true` и извлекает `message_id`.
+2. Передаёт в `Assistant::handle` как `$replyToTelegramMsgId`.
+3. Ассистент ищет в истории сообщение с `role='assistant'` и совпадающим `telegramMsgId`.
+4. Если нашёл — добавляет в текущий user-блок:
+   ```
+   <reply_context>
+   Пользователь ответил на твоё предыдущее сообщение:
+   «<цитата реплики бота>»
+   </reply_context>
+
+   <сам текст пользователя>
+   ```
+5. Если не нашёл (TTL истёк, окно сдвинулось) — логирует warning, работает как обычное сообщение.
+
+### Логирование
+
+- `Assistant input` — `user_id`, `history_size`, `reply_context: bool` перед вызовом Claude.
+- `Assistant reply target not found in history` — если Reply указал на исчезнувшее сообщение.
+- `Assistant history reset` — при `/reset` с `size_before`.
+
 ## Tools (11 штук)
 
 Все в `App\AI\Tool\`, автоконфигурируются тегом `app.assistant_tool`. Общий

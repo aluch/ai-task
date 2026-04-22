@@ -11,9 +11,9 @@ use App\Telegram\Handler\DoneHandler;
 use App\Telegram\Handler\AssistantHandler;
 use App\Telegram\Handler\FreeCallbackHandler;
 use App\Telegram\Handler\FreeHandler;
-use App\Telegram\Handler\FreeTextHandler;
 use App\Telegram\Handler\ListCallbackHandler;
 use App\Telegram\Handler\ReminderCallbackHandler;
+use App\Telegram\Handler\ResetHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
@@ -42,8 +42,8 @@ class HandlerRegistry
         private readonly TaskActionCallbackHandler $taskActionCallbackHandler,
         private readonly FreeHandler $freeHandler,
         private readonly FreeCallbackHandler $freeCallbackHandler,
-        private readonly FreeTextHandler $freeTextHandler,
         private readonly AssistantHandler $assistantHandler,
+        private readonly ResetHandler $resetHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
         private readonly TelegramUserResolver $userResolver,
@@ -92,6 +92,10 @@ class HandlerRegistry
         $bot->onCommand('free', $this->freeHandler);
         $bot->onCommand('free {args}', $this->freeHandler);
 
+        // Сброс истории диалога Ассистента (alias'ов для единообразия не делаем —
+        // пользователь может /reset набрать в одну команду).
+        $bot->onCommand('reset', $this->resetHandler);
+
         // Callback queries
         $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
         $bot->onCallbackQueryData('done:{data}', $this->taskActionCallbackHandler);
@@ -101,9 +105,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('list:{data}', $this->listCallbackHandler);
         $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
 
-        // Свободный текст теперь идёт в Assistant (tool calling). FreeTextHandler
-        // оставлен в коде как быстрый откат — если assistant начнёт сбоить,
-        // достаточно поменять одну строку ниже обратно на $this->freeTextHandler.
+        // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;
         $bot->fallback(function (Nutgram $bot) use ($assistantHandler): void {
             $text = $bot->message()?->text;

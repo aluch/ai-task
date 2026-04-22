@@ -84,7 +84,8 @@
 | `/unblock` или `/unblock <task> <blocker>` | Убрать зависимость. Без аргументов — показывает только задачи с блокерами |
 | `/deps` или `/deps <id>` | Показать зависимости задачи (blockedBy + blocking). Без аргументов — inline-кнопки для выбора |
 | `/free <время> [контекст]` | AI подбирает задачи под свободное время и контекст. Примеры: `/free 2h`, `/free 30m дома`, `/free 1h на улице`. Ответ — план с inline-кнопками ✅ Беру! / 🔄 Другие варианты / ❌ Не сейчас |
-| (свободный текст) | AI-ассистент через tool calling: разбирает намерение и сам выбирает create_task / list_tasks / mark_task_done / snooze_task. Обрабатывается `AssistantHandler`. См. `docs/architecture/assistant.md` |
+| `/reset` | Сбросить историю диалога с Ассистентом (Redis, окно 10 сообщений / 30 мин). См. `docs/architecture/assistant.md` § Память о диалоге |
+| (свободный текст) | AI-ассистент с памятью диалога (10 сообщений / 30 мин в Redis) и поддержкой Telegram Reply. Разбирает намерение и вызывает нужные tools. См. `docs/architecture/assistant.md` |
 
 ### Интерактивный flow (inline-кнопки)
 

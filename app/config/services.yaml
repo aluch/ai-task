@@ -68,6 +68,10 @@ services:
         arguments:
             $tools: !tagged_iterator app.assistant_tool
 
+    App\AI\ConversationHistoryStore:
+        arguments:
+            $redisUrl: '%redis.url%'
+
     App\Service\FreeSuggestionStore:
         arguments:
             $redisUrl: '%redis.url%'

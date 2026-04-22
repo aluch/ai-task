@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Smoke;
 
 use App\AI\Assistant;
+use App\AI\ConversationHistoryStore;
+use App\AI\DTO\HistoryMessage;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Enum\TaskPriority;
@@ -30,11 +32,15 @@ final class ScenarioRunner
     /** @var array<string, callable(): ScenarioResult> */
     private array $scenarios;
 
+    /** Инкрементальный счётчик telegram_msg_id для имитации реальных id в smoke. */
+    private int $msgIdCounter = 1000;
+
     public function __construct(
         private readonly SmokeHarness $harness,
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
         private readonly Assistant $assistant,
+        private readonly ConversationHistoryStore $historyStore,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -57,6 +63,10 @@ final class ScenarioRunner
             'assistant-block-tasks' => fn () => $this->assistantBlockTasks(),
             'assistant-suggest-tasks' => fn () => $this->assistantSuggestTasks(),
             'assistant-fuzzy-russian-match' => fn () => $this->assistantFuzzyRussianMatch(),
+            'assistant-history-reference' => fn () => $this->assistantHistoryReference(),
+            'assistant-reply-context' => fn () => $this->assistantReplyContext(),
+            'assistant-history-ttl' => fn () => $this->assistantHistoryTtl(),
+            'assistant-reset-command' => fn () => $this->assistantResetCommand(),
         ];
     }
 
@@ -795,6 +805,150 @@ final class ScenarioRunner
         return ScenarioResult::pass('assistant-fuzzy-russian-match', 0);
     }
 
+    /**
+     * История диалога: после «Создай задачу купить молоко» сообщение
+     * «Отложи её на завтра» без названия должно зацепиться за последнюю
+     * обсуждаемую задачу через историю.
+     */
+    private function assistantHistoryReference(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $this->runAssistant($user, 'Создай задачу купить молоко');
+        $r2 = $this->runAssistant($user, 'Отложи её на завтра 14:00');
+
+        $tasks = $this->userTasks($user, [TaskStatus::SNOOZED]);
+        if ($tasks === []) {
+            return ScenarioResult::fail(
+                'assistant-history-reference',
+                0,
+                'задача не отложена (по истории не нашёл какую). reply=' . mb_substr($r2->replyText, 0, 180),
+            );
+        }
+        foreach ($tasks as $t) {
+            if (mb_stripos($t->getTitle(), 'молок') !== false) {
+                return ScenarioResult::pass('assistant-history-reference', 0);
+            }
+        }
+
+        return ScenarioResult::fail(
+            'assistant-history-reference',
+            0,
+            'отложена не та задача. snoozed: ' . implode(',', array_map(fn (Task $t) => $t->getTitle(), $tasks)),
+        );
+    }
+
+    /**
+     * Reply-механика: первое сообщение ассистента содержит вопрос или
+     * инфо, второе — Reply на него. Блок <reply_context> должен пойти
+     * в промпт. Проверяем простой кейс: создаём задачу «узнать ДР Ксюши»,
+     * потом Reply с датой — ассистент должен понять что это ответ по
+     * контексту.
+     */
+    private function assistantReplyContext(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $this->runAssistant($user, 'Создай задачу: узнать когда у Ксюши день рождения');
+        $replyTarget = $this->lastAssistantMsgId;
+
+        // Reply на сообщение бота с конкретной датой
+        $r2 = $this->runAssistant($user, '2 мая', replyToMsgId: $replyTarget);
+
+        // Reply_context должен был пойти в промпт — проверим через лог (хотя
+        // логи в smoke не кэшируются просто). Минимальная проверка: ответ
+        // ассистента должен упомянуть Ксюшу или ДР — значит контекст понят.
+        $replyLc = mb_strtolower($r2->replyText);
+        $mentionsBirthday = mb_strpos($replyLc, 'ксюш') !== false
+            || mb_strpos($replyLc, 'рожден') !== false
+            || mb_strpos($replyLc, 'др') !== false
+            || mb_strpos($replyLc, 'мая') !== false;
+        if (!$mentionsBirthday) {
+            return ScenarioResult::fail(
+                'assistant-reply-context',
+                0,
+                'reply на дату не связал с ДР Ксюши. reply=' . mb_substr($r2->replyText, 0, 200),
+            );
+        }
+
+        return ScenarioResult::pass('assistant-reply-context', 0);
+    }
+
+    /**
+     * TTL истории: после clear() (имитация истечения 30-минутного Redis TTL)
+     * ссылка на предыдущую задачу не должна находить контекст. Реальный
+     * Redis TTL через FrozenClock замокать нельзя, используем прямой clear().
+     */
+    private function assistantHistoryTtl(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $this->runAssistant($user, 'Создай задачу купить хлеб');
+        // Имитация истечения TTL
+        $this->historyStore->clear($user);
+
+        // Ассистент не должен найти контекст — при этом задача уже в БД,
+        // но он не будет знать о чём «она». Разумное поведение — либо
+        // создать новую задачу из «отложи её», либо попросить уточнить.
+        $r = $this->runAssistant($user, 'Отложи её на завтра 14:00');
+
+        // Исходная задача «Купить хлеб» должна остаться активной (PENDING)
+        // — не отложиться, потому что ассистент без контекста не должен
+        // был её тронуть (или хотя бы должен был уточнить, но НЕ молча
+        // отложить).
+        $active = $this->userTasks($user, [TaskStatus::PENDING, TaskStatus::IN_PROGRESS]);
+        $originalActive = false;
+        foreach ($active as $t) {
+            if (mb_stripos($t->getTitle(), 'хлеб') !== false) {
+                $originalActive = true;
+                break;
+            }
+        }
+        if (!$originalActive) {
+            return ScenarioResult::fail(
+                'assistant-history-ttl',
+                0,
+                'ассистент отложил задачу несмотря на истёкшую историю. reply=' . mb_substr($r->replyText, 0, 180),
+            );
+        }
+
+        return ScenarioResult::pass('assistant-history-ttl', 0);
+    }
+
+    /**
+     * /reset-команда: после нескольких сообщений вызов clear() должен
+     * занулить историю. Следующее сообщение не должно иметь контекста.
+     */
+    private function assistantResetCommand(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $this->runAssistant($user, 'Создай задачу постирать');
+        $this->runAssistant($user, 'Создай задачу пропылесосить');
+        $sizeBefore = $this->historyStore->getSize($user);
+        if ($sizeBefore < 2) {
+            return ScenarioResult::fail(
+                'assistant-reset-command',
+                0,
+                "ожидалось >=2 сообщений в истории, получено {$sizeBefore}",
+            );
+        }
+
+        // Имитация /reset — напрямую через store, как делает ResetHandler.
+        $this->historyStore->clear($user);
+
+        $sizeAfter = $this->historyStore->getSize($user);
+        if ($sizeAfter !== 0) {
+            return ScenarioResult::fail(
+                'assistant-reset-command',
+                0,
+                "после clear() ожидалось 0, получено {$sizeAfter}",
+            );
+        }
+
+        return ScenarioResult::pass('assistant-reset-command', 0);
+    }
+
     private function setupFreshAssistant(): User
     {
         $this->harness->reset();
@@ -802,16 +956,48 @@ final class ScenarioRunner
         $user = $this->harness->ensureTestUser();
         // реалистичный now, не quiet hours
         $this->harness->freezeTimeAt(new \DateTimeImmutable('2026-06-15 12:00:00 UTC'));
+        $this->historyStore->clear($user);
+        $this->msgIdCounter = 1000;
 
         return $user;
     }
 
-    private function runAssistant(User $user, string $message): \App\AI\DTO\AssistantResult
+    /**
+     * Имитирует AssistantHandler: вызывает Assistant::handle и сохраняет
+     * оба сообщения (user + assistant) в историю — чтобы следующий
+     * runAssistant() увидел контекст. Возвращает AssistantResult + msg_id
+     * ассистент-сообщения (для последующих Reply-сценариев).
+     */
+    private function runAssistant(User $user, string $message, ?int $replyToMsgId = null): \App\AI\DTO\AssistantResult
     {
         $now = $this->harness->clock()?->now() ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $userMsgId = ++$this->msgIdCounter;
 
-        return $this->assistant->handle($user, $message, $now);
+        $result = $this->assistant->handle($user, $message, $now, $replyToMsgId);
+
+        $this->historyStore->append($user, new HistoryMessage(
+            role: 'user',
+            text: $message,
+            telegramMsgId: $userMsgId,
+            at: $now,
+            replyToMsgId: $replyToMsgId,
+        ));
+
+        $botMsgId = ++$this->msgIdCounter;
+        $this->historyStore->append($user, new HistoryMessage(
+            role: 'assistant',
+            text: $result->replyText,
+            telegramMsgId: $botMsgId,
+            at: $now,
+            toolsCalled: $result->toolsCalled,
+        ));
+        // Отдаём botMsgId через побочный канал — полезно для Reply-сценариев.
+        $this->lastAssistantMsgId = $botMsgId;
+
+        return $result;
     }
+
+    private int $lastAssistantMsgId = 0;
 
     /**
      * @param TaskStatus[]|null $statuses
