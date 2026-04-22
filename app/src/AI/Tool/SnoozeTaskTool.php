@@ -145,6 +145,11 @@ class SnoozeTaskTool implements AssistantTool
         }
 
         $task->snooze($untilUtc);
+        // Пользователь явно выбрал время — quiet hours не применяем
+        // при разбуживании. Если автоматический snooze (через кнопку
+        // «отложить на час» в напоминании) хочет поведение по умолчанию,
+        // он использует Task::snooze() и не трогает respectQuietHours.
+        $task->setRespectQuietHours(false);
         $em->flush();
 
         $userTz = new \DateTimeZone($user->getTimezone());

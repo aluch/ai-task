@@ -4,11 +4,12 @@
 
 ## Концепция
 
-Три типа напоминаний, все реализованы:
+Четыре типа напоминаний, все реализованы:
 
 1. **Приближающийся дедлайн (Тип А)** — за N минут до дедлайна (N задаёт AI или пользователь явно) бот присылает уведомление с кнопками «Сделал / Отложить / Беру в работу».
 2. **Периодические напоминания (Тип Б)** — «пинать» задачу без дедлайна каждые N минут, пока пользователь не закроет. Для залежавшихся важных задач.
 3. **Пробуждение SNOOZED (Тип В)** — по истечении `snoozedUntil` бот присылает уведомление «задача снова активна» и только после этого переводит задачу в PENDING.
+4. **Одноразовое напоминание на время (Тип Г)** — «напомни в 18:00 про X». Отдельный таймер на точный момент, задача при этом остаётся активной (в отличие от snooze).
 
 ## Модель данных
 
@@ -19,6 +20,10 @@
 - `reminderIntervalMinutes: ?int` — интервал периодических напоминаний в минутах. `null` = не пинать. Ставится AI только для задач **без дедлайна** с priority ≥ high, либо по явной просьбе пользователя. Минимум — 60 минут (AI санитизирует «каждые 5 минут» → 60).
 - `lastRemindedAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — скользящее окно для Типа Б. Ставится в момент отправки периодического напоминания. `null` → ещё ни разу не напоминали (но первое напоминание не раньше `createdAt + 60 минут`, чтобы не спамить сразу после создания).
 - `snoozedUntil: ?\DateTimeImmutable` (TIMESTAMPTZ) — до какого момента задача в статусе SNOOZED. По истечении — `CheckSnoozeWakeupsHandler` пришлёт уведомление и переведёт в PENDING.
+- `singleReminderAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — точный момент одноразового напоминания (Тип Г). Задача остаётся активной, напоминание — просто «пинг в HH:MM».
+- `singleReminderSentAt: ?\DateTimeImmutable` (TIMESTAMPTZ) — когда single-напоминание было отправлено (чтобы не слать повторно). `null` = ещё не отправлено.
+- `respectQuietHours: bool` (default `true`) — учитывать ли quiet hours пользователя для Типов А/Б/В. Ассистент выставляет `false` когда пользователь явно выбрал время («отложи до 6:50», «напомни за час») — в этом случае уважать ночь не нужно, человек сам заказал этот момент.
+- `singleReminderRespectQuietHours: bool` (default `false`) — тот же флаг для Типа Г. Default `false` — такой тип всегда явная просьба пользователя.
 
 **Методы Task**:
 - `markDeadlineReminderSent()` — ставит `deadlineReminderSentAt = now (UTC)`.
@@ -45,16 +50,18 @@ ReminderSchedule (#[AsSchedule('reminders')])
    │ RecurringMessage::every('1 minute', CheckDeadlineRemindersMessage)  ← Тип А
    │ RecurringMessage::every('1 minute', CheckPeriodicRemindersMessage)  ← Тип Б
    │ RecurringMessage::every('1 minute', CheckSnoozeWakeupsMessage)      ← Тип В
+   │ RecurringMessage::every('1 minute', CheckSingleRemindersMessage)    ← Тип Г
    ▼
 Messenger transport scheduler_reminders (DSN: doctrine://default)
    │
    ▼
-messenger:consume scheduler_reminders  (Docker-сервис `scheduler`, prod env)
+messenger:consume scheduler_reminders  (Docker-сервис `scheduler`, APP_ENV=dev + APP_DEBUG=0)
    │
    ▼
 CheckDeadlineRemindersHandler   → ReminderSender::sendDeadlineReminder
 CheckPeriodicRemindersHandler   → ReminderSender::sendPeriodicReminder
 CheckSnoozeWakeupsHandler       → ReminderSender::sendSnoozeWakeup
+CheckSingleRemindersHandler     → ReminderSender::sendSingleReminder
 ```
 
 **Docker-сервис** `scheduler` запускает `messenger:consume scheduler_reminders --time-limit=3600` в `APP_ENV=prod` с предварительным `cache:warmup`. Prod-режим обязателен — в dev `TraceableEventDispatcher` ломается в worker loop (баг Symfony 7.4). Worker сам завершается через час, Docker рестартит — защита от утечек в long-running процессе.
@@ -92,6 +99,22 @@ CheckSnoozeWakeupsHandler       → ReminderSender::sendSnoozeWakeup
    ```
 5. Успех → `setLastRemindedAt(now)` + flush → `SENT`. Важно: `lastRemindedAt` — скользящее окно, не флаг «отправлено один раз».
 
+### sendSingleReminder(Task): SendResult — Тип Г
+
+1. Нет `telegramId` → `SKIPPED_NO_CHAT_ID`.
+2. Quiet hours применяются ТОЛЬКО если `singleReminderRespectQuietHours=true` (по умолчанию — false).
+3. Recently_active **с исключением** для коротких таймеров: если
+   `singleReminderAt - createdAt < 10 минут`, значит пользователь только что
+   попросил «через 3 мин напомни» — ждать 5 минут его молчания глупо, фильтр пропускается.
+4. Текст:
+   ```
+   🔔 Напоминаю:
+
+   📝 Собрать компостер
+   ⏰ дедлайн 25.04 19:00  (если есть)
+   ```
+5. Успех → `singleReminderSentAt = now` + flush → `SENT`. Больше этот таймер не сработает.
+
 ### sendSnoozeWakeup(Task): SendResult — Тип В
 
 1. Нет `telegramId` → `SKIPPED_NO_CHAT_ID`.
@@ -110,6 +133,31 @@ CheckSnoozeWakeupsHandler       → ReminderSender::sendSnoozeWakeup
 
 Во всех трёх случаях — одинаковые три кнопки (см. ниже).
 
+## Quiet hours bypass для явно выбранных моментов
+
+`User.quietStartHour`/`User.quietEndHour` — глобальная политика «не беспокоить
+ночью» (default 22–8). Применяется к автоматическим напоминаниям (дедлайны,
+периодические) и к пробуждению отложенных — там пользователь НЕ выбирал
+конкретный момент.
+
+Когда пользователь ЯВНО выбирает время:
+
+- «Отложи до 6:50» → `snooze_task` tool → `task.respectQuietHours = false`.
+- «Напомни за час до дедлайна» → `add_reminder_to_task` → `respectQuietHours = false`.
+- «Напомни в 6:50» → `add_single_reminder` → отдельное
+  `singleReminderRespectQuietHours = false` (default для этого типа).
+
+В этом случае quiet hours НЕ блокируют отправку — в 6:50 уведомление придёт,
+несмотря на quiet 22–8. Логика: человек сам заказал этот момент, значит
+готов получить его.
+
+Автоматические flows (`TaskParser` ставит `remind_before_deadline_minutes`
+при парсинге «срочно сегодня» и т.п.) — ничего не меняют в `respectQuietHours`,
+остаётся default `true`. Пользователь не просил явно — уважаем ночь.
+
+Если пользователь явно просит «если не поздно» / «в разумное время» —
+ассистент передаёт `respect_quiet_hours=true` в соответствующий tool.
+
 ## Фильтр recently_active: исключение для коротких напоминаний
 
 **Зачем**: пользователь пишет «через 3 минуты напомни». AI ставит `remindBeforeDeadlineMinutes=3`. Но пользователь только что писал → `isRecentlyActive(5)` вернёт true → напоминание пропущено, выйдет через 5+ минут, слишком поздно.
@@ -117,6 +165,10 @@ CheckSnoozeWakeupsHandler       → ReminderSender::sendSnoozeWakeup
 **Правило**: если `remindBeforeDeadlineMinutes < 5`, фильтр recently_active не применяется. Пользователь сам заказал короткое напоминание — значит ожидает его получить. Quiet hours продолжают действовать (ночь — это ночь).
 
 **Для Тип Б и Тип В** короткого исключения нет: периодические и разбуживание имеют другую семантику.
+
+**Для Тип Г** (single) аналогичное исключение: если между `createdAt` задачи
+и `singleReminderAt` меньше 10 минут, recently_active не применяется — значит
+пользователь только что сам заказал короткий таймер.
 
 ## Lazy reactivation снесена
 

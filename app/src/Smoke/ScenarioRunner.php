@@ -46,6 +46,9 @@ final class ScenarioRunner
             'periodic-in-progress-doubled' => fn () => $this->periodicInProgressDoubled(),
             'snooze-wakeup-success' => fn () => $this->snoozeWakeupSuccess(),
             'snooze-wakeup-quiet-hours' => fn () => $this->snoozeWakeupQuietHours(),
+            'single-reminder-basic' => fn () => $this->singleReminderBasic(),
+            'single-reminder-bypasses-quiet-hours' => fn () => $this->singleReminderBypassesQuietHours(),
+            'single-reminder-respects-recently-active-except-short' => fn () => $this->singleReminderShortBypassesRecent(),
             // Assistant — тут дергаем реальный Claude API, медленнее
             'assistant-basic-flow' => fn () => $this->assistantBasicFlow(),
             'assistant-update-task' => fn () => $this->assistantUpdateTask(),
@@ -344,6 +347,162 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('snooze-wakeup-quiet-hours', 0);
+    }
+
+    // ============================================================
+    // Single-shot reminder (Тип Г) сценарии. Claude API не дёргают.
+    // ============================================================
+
+    /**
+     * Задача создана, single_reminder_at через +1 мин. Продвигаем clock,
+     * жмём tick — ожидаем SENT + singleReminderSentAt проставлен.
+     */
+    private function singleReminderBasic(): ScenarioResult
+    {
+        $setup = $this->setupFresh('2026-06-15 12:00:00 UTC', quietHours: [22, 8]);
+        $now = $setup['now'];
+        $user = $setup['user'];
+
+        $task = $this->createTask($user, 'Single basic', [
+            'singleReminderAt' => $now->modify('+1 minute'),
+        ]);
+
+        // До момента — кандидат ещё не должен быть возвращён
+        $repo = $this->doctrine->getManager()->getRepository(Task::class);
+        if ($repo->findSingleReminderCandidates($now) !== []) {
+            return ScenarioResult::fail('single-reminder-basic', 0, 'до now кандидат не должен быть готов');
+        }
+
+        // Продвигаем на +2 мин — должен стать кандидатом и триггернуться
+        $this->harness->clock()->advance('+2 minutes');
+        $moved = $this->harness->clock()->now();
+        $candidates = $repo->findSingleReminderCandidates($moved);
+        if (count($candidates) !== 1) {
+            return ScenarioResult::fail('single-reminder-basic', 0, 'после сдвига ожидался 1 кандидат, получено ' . count($candidates));
+        }
+
+        $result = $this->sender->sendSingleReminder($candidates[0]);
+        if ($result !== SendResult::SENT) {
+            return ScenarioResult::fail('single-reminder-basic', 0, "expected SENT, got {$result->value}");
+        }
+
+        $fresh = $this->harness->refreshTask($task->getId());
+        if ($fresh?->getSingleReminderSentAt() === null) {
+            return ScenarioResult::fail('single-reminder-basic', 0, 'singleReminderSentAt не проставлен');
+        }
+
+        return ScenarioResult::pass('single-reminder-basic', 0);
+    }
+
+    /**
+     * now = 00:00 UTC → 03:00 Tallinn (quiet). single_reminder_respect_quiet_hours=false.
+     * Ожидаем SENT (не SKIPPED_QUIET_HOURS).
+     */
+    private function singleReminderBypassesQuietHours(): ScenarioResult
+    {
+        $setup = $this->setupFresh('2026-06-15 00:00:00 UTC', quietHours: [22, 8]);
+        $now = $setup['now'];
+        $user = $setup['user'];
+
+        $task = $this->createTask($user, 'Single at night', [
+            'singleReminderAt' => $now->modify('-1 minute'), // уже «пора»
+            'singleReminderRespectQuietHours' => false,
+        ]);
+
+        $result = $this->sender->sendSingleReminder($task);
+        if ($result !== SendResult::SENT) {
+            return ScenarioResult::fail('single-reminder-bypasses-quiet-hours', 0, "expected SENT, got {$result->value}");
+        }
+
+        // Зеркало: если поставить respectQuietHours=true — должно быть SKIPPED
+        $this->harness->reset();
+        $this->harness->notifier()->clear();
+        $user2 = $this->harness->ensureTestUser();
+        $user2->setQuietStartHour(22);
+        $user2->setQuietEndHour(8);
+        $user2->setLastMessageAt(null);
+        $this->doctrine->getManager()->flush();
+        $this->harness->freezeTimeAt(new \DateTimeImmutable('2026-06-15 00:00:00 UTC'));
+
+        $task2 = $this->createTask($user2, 'Single at night — respect', [
+            'singleReminderAt' => $this->harness->clock()->now()->modify('-1 minute'),
+            'singleReminderRespectQuietHours' => true,
+        ]);
+
+        $result2 = $this->sender->sendSingleReminder($task2);
+        if ($result2 !== SendResult::SKIPPED_QUIET_HOURS) {
+            return ScenarioResult::fail('single-reminder-bypasses-quiet-hours', 0, "с respect=true ожидался SKIPPED_QUIET_HOURS, got {$result2->value}");
+        }
+
+        return ScenarioResult::pass('single-reminder-bypasses-quiet-hours', 0);
+    }
+
+    /**
+     * Создаём задачу с singleReminderAt = createdAt + 3 минуты (короткий
+     * таймер). Пользователь активен (lastMessageAt = now - 30s). Фильтр
+     * recently_active должен быть пропущен → SENT.
+     *
+     * Зеркало: та же задача но с singleReminderAt = createdAt + 20 минут
+     * (длинный таймер) → recently_active применяется → SKIPPED.
+     */
+    private function singleReminderShortBypassesRecent(): ScenarioResult
+    {
+        $setup = $this->setupFresh('2026-06-15 12:00:00 UTC', quietHours: [22, 8]);
+        $now = $setup['now'];
+        $user = $setup['user'];
+
+        $user->setLastMessageAt($now->modify('-30 seconds'));
+        $this->doctrine->getManager()->flush();
+
+        // short: at - createdAt = 3 мин (< 10) → skip recently_active
+        $shortTask = $this->createTask($user, 'Single short', [
+            'singleReminderAt' => $now->modify('+3 minutes'),
+        ]);
+        // createdAt у новой задачи = сейчас (из PrePersist) — поэтому at - createdAt ≈ 3 мин.
+
+        // Продвигаем clock на +4 мин, чтобы at уже прошёл; lastMessageAt всё ещё «недавний».
+        $this->harness->clock()->advance('+4 minutes');
+
+        $r1 = $this->sender->sendSingleReminder($shortTask);
+        if ($r1 !== SendResult::SENT) {
+            return ScenarioResult::fail(
+                'single-reminder-respects-recently-active-except-short',
+                0,
+                "short: expected SENT (<10min bypass), got {$r1->value}",
+            );
+        }
+
+        // Зеркало: длинный таймер — не должен обойти recently_active
+        $this->harness->reset();
+        $this->harness->notifier()->clear();
+        $user2 = $this->harness->ensureTestUser();
+        $user2->setQuietStartHour(22);
+        $user2->setQuietEndHour(8);
+        $this->harness->freezeTimeAt(new \DateTimeImmutable('2026-06-15 12:00:00 UTC'));
+        $now2 = $this->harness->clock()->now();
+        $user2->setLastMessageAt($now2->modify('-30 seconds'));
+        $this->doctrine->getManager()->flush();
+
+        $longTask = $this->createTask($user2, 'Single long', [
+            'singleReminderAt' => $now2->modify('+20 minutes'),
+        ]);
+        $this->harness->clock()->advance('+21 minutes');
+        // но lastMessageAt сдвигать не будем — он всё ещё -30s относительно ИСХОДНОГО;
+        // обновлю чтобы оставался recent
+        $refreshedUser = $this->doctrine->getManager()->find(\App\Entity\User::class, $user2->getId());
+        $refreshedUser->setLastMessageAt($this->harness->clock()->now()->modify('-30 seconds'));
+        $this->doctrine->getManager()->flush();
+
+        $r2 = $this->sender->sendSingleReminder($longTask);
+        if ($r2 !== SendResult::SKIPPED_RECENTLY_ACTIVE) {
+            return ScenarioResult::fail(
+                'single-reminder-respects-recently-active-except-short',
+                0,
+                "long: expected SKIPPED_RECENTLY_ACTIVE, got {$r2->value}",
+            );
+        }
+
+        return ScenarioResult::pass('single-reminder-respects-recently-active-except-short', 0);
     }
 
     // ============================================================
@@ -648,15 +807,30 @@ final class ScenarioRunner
             $refl = new \ReflectionProperty(Task::class, 'snoozedUntil');
             $refl->setValue($task, $opts['snoozedUntil']);
         }
+        if (isset($opts['singleReminderAt'])) {
+            $task->setSingleReminderAt($opts['singleReminderAt']);
+        }
+        if (array_key_exists('singleReminderRespectQuietHours', $opts)) {
+            $task->setSingleReminderRespectQuietHours((bool) $opts['singleReminderRespectQuietHours']);
+        }
+        if (array_key_exists('respectQuietHours', $opts)) {
+            $task->setRespectQuietHours((bool) $opts['respectQuietHours']);
+        }
 
         $em = $this->doctrine->getManager();
         $em->persist($task);
         $em->flush();
 
         // createdAt — нужно задавать после persist (PrePersist уже сработал).
-        if (isset($opts['createdAt'])) {
+        // TimestampableTrait::initTimestamps использует `new \DateTimeImmutable('now')`
+        // без Clock abstraction, поэтому в smoke-тестах с FrozenClock задача
+        // получает РЕАЛЬНОЕ сегодняшнее время. Перезаписываем на frozen-now
+        // по умолчанию, чтобы логика вроде «at - createdAt < 10 мин» работала
+        // относительно замороженного момента, а не абсолютного.
+        $desiredCreatedAt = $opts['createdAt'] ?? $this->harness->clock()?->now();
+        if ($desiredCreatedAt !== null) {
             $refl = new \ReflectionProperty(Task::class, 'createdAt');
-            $refl->setValue($task, $opts['createdAt']);
+            $refl->setValue($task, $desiredCreatedAt);
             $em->flush();
         }
 

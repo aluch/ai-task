@@ -255,6 +255,25 @@ class TaskRepository extends ServiceEntityRepository
     }
 
     /**
+     * Кандидаты на одноразовое напоминание (Тип Г): singleReminderAt <= now,
+     * ещё не отправлено, в активных статусах.
+     *
+     * @return Task[]
+     */
+    public function findSingleReminderCandidates(\DateTimeImmutable $now): array
+    {
+        return $this->createQueryBuilder('t')
+            ->andWhere('t.singleReminderAt IS NOT NULL')
+            ->andWhere('t.singleReminderSentAt IS NULL')
+            ->andWhere('t.singleReminderAt <= :now')
+            ->andWhere('t.status IN (:open)')
+            ->setParameter('now', $now)
+            ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS])
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Отложенные задачи, которым пора проснуться: snoozedUntil <= now.
      * Используется CheckSnoozeWakeupsHandler'ом для активной реактивации
      * с уведомлением пользователя (вместо прежнего lazy-пробуждения).

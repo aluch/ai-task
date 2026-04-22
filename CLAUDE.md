@@ -212,8 +212,8 @@ docker compose exec --user 1000:1000 php composer <cmd>
   - `sendSnoozeWakeup(Task)` (Тип В) — уведомление «задача снова активна» по истечении `snoozedUntil`, с последующей реактивацией (PENDING). Recently_active не применяется. При quiet hours задача остаётся SNOOZED до следующего тика.
 
   Все возвращают `SendResult`: SENT / SKIPPED_QUIET_HOURS / SKIPPED_RECENTLY_ACTIVE / SKIPPED_NO_CHAT_ID / FAILED.
-- `App\Scheduler\ReminderSchedule` (#[AsSchedule('reminders')]) — раз в минуту диспатчит три recurring message'а через Messenger на транспорт `scheduler_reminders` (doctrine://default): `CheckDeadlineRemindersMessage`, `CheckPeriodicRemindersMessage`, `CheckSnoozeWakeupsMessage`.
-- `App\MessageHandler\CheckDeadlineRemindersHandler` / `CheckPeriodicRemindersHandler` / `CheckSnoozeWakeupsHandler` — каждый выбирает своих кандидатов через `TaskRepository` (`findDeadlineReminderCandidates`, `findPeriodicReminderCandidates`, `findSnoozeWakeupCandidates`) и прогоняет через `ReminderSender`.
+- `App\Scheduler\ReminderSchedule` (#[AsSchedule('reminders')]) — раз в минуту диспатчит четыре recurring message'а через Messenger на транспорт `scheduler_reminders` (doctrine://default): `CheckDeadlineRemindersMessage`, `CheckPeriodicRemindersMessage`, `CheckSnoozeWakeupsMessage`, `CheckSingleRemindersMessage`.
+- `App\MessageHandler\CheckDeadlineRemindersHandler` / `CheckPeriodicRemindersHandler` / `CheckSnoozeWakeupsHandler` / `CheckSingleRemindersHandler` — каждый выбирает своих кандидатов через `TaskRepository` (`findDeadlineReminderCandidates`, `findPeriodicReminderCandidates`, `findSnoozeWakeupCandidates`, `findSingleReminderCandidates`) и прогоняет через `ReminderSender`.
 - **Пробуждение SNOOZED — только через Scheduler**. Бывший `SnoozeReactivator` удалён, `TaskRepository::findForUser` больше не пытается lazy-reactivate. Пользователь получает явное уведомление, прежде чем задача появится в списках — ценой латенса до 1 минуты.
 - `App\Telegram\Paginator` — сборка клавиатур пагинации (task picker с «← Назад / Стр. N/M / Далее → / 🔍 Поиск / ✖ Закрыть» + list-keyboard только с навигацией).
 - `App\Telegram\SearchDispatcher` — роутинг поискового текста (после 🔍) в нужный handler по action'у сохранённой сессии.
@@ -250,13 +250,14 @@ bot:
 - `App\AI\TaskAdvisor` — подбирает оптимальный набор задач под свободное время и контекст (для команды `/free`). Отличается от парсера: не извлечение, а рассуждение (приоритеты, маршруты, группировка). Используется Sonnet вместо Haiku. Подробности — `docs/architecture/task-advisor.md`.
 - `App\AI\Assistant` — AI-ассистент через tool calling. Обрабатывает свободный текст в Telegram через `AssistantHandler`, выбирает нужный tool на основе намерения пользователя, исполняет и отвечает по-человечески. Tool use loop до 5 итераций, retry на rate-limit/5xx от Anthropic. Подробности — `docs/architecture/assistant.md`.
 
-  Доступные tools (10 штук, все автоконфигурируются по тегу `app.assistant_tool`):
+  Доступные tools (11 штук, все автоконфигурируются по тегу `app.assistant_tool`):
   - `create_task` — с защитой от дубликатов (корни ≥50% совпадают → success=false), обход через `force=true`.
   - `list_tasks` — фильтры по статусу + query.
   - `search_tasks_by_title` — fuzzy-поиск с морфо-стеммингом.
   - `update_task` — любое поле задачи; при смене дедлайна/remind_before сбрасывает `deadline_reminder_sent_at`.
-  - `mark_task_done`, `snooze_task`.
-  - `add_reminder_to_task` — remind_before_deadline_minutes или reminder_interval_minutes (клампится к 60).
+  - `mark_task_done`, `snooze_task` (ставит `respect_quiet_hours=false` — user-chosen time).
+  - `add_reminder_to_task` — remind_before_deadline_minutes или reminder_interval_minutes (клампится к 60). Тоже `respect_quiet_hours=false`.
+  - `add_single_reminder` — одноразовое на конкретный момент (Тип Г). Задача остаётся активной, не snooze.
   - `block_task` / `unblock_task` — с проверкой циклов.
   - `suggest_tasks` — вызов TaskAdvisor (аналог /free, но только текст без кнопок).
 

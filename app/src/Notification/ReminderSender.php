@@ -42,7 +42,7 @@ class ReminderSender
 
         $now = $this->clock->now();
 
-        if ($user->isQuietHoursNow($now)) {
+        if ($task->getRespectQuietHours() && $user->isQuietHoursNow($now)) {
             $this->logger->info('Reminder skipped (quiet hours)', [
                 'task_id' => $task->getId()->toRfc4122(),
                 'user_id' => $user->getId()->toRfc4122(),
@@ -110,7 +110,7 @@ class ReminderSender
 
         $now = $this->clock->now();
 
-        if ($user->isQuietHoursNow($now)) {
+        if ($task->getRespectQuietHours() && $user->isQuietHoursNow($now)) {
             return SendResult::SKIPPED_QUIET_HOURS;
         }
 
@@ -163,11 +163,12 @@ class ReminderSender
 
         $now = $this->clock->now();
 
-        // Только quiet hours — разбуживание это событие, которое пользователь
-        // сам запланировал, а не автоматический пинок. isRecentlyActive тут
-        // не применяем: «я отложил до 10:00» значит «в 10:00 разбуди», а не
-        // «в 10:00 разбуди если я минут 5 молчу».
-        if ($user->isQuietHoursNow($now)) {
+        // Quiet hours уважаем только если task->respectQuietHours=true.
+        // Когда snooze делался ассистентом через snooze_task tool — respect
+        // выключен (пользователь явно выбрал время), и в 6:50 разбудим
+        // несмотря на quiet 22-8. isRecentlyActive не применяем вообще:
+        // «отложил до 10:00» значит «в 10:00 разбуди», а не «если я молчу».
+        if ($task->getRespectQuietHours() && $user->isQuietHoursNow($now)) {
             return SendResult::SKIPPED_QUIET_HOURS;
         }
 
@@ -200,6 +201,91 @@ class ReminderSender
         ]);
 
         return SendResult::SENT;
+    }
+
+    /**
+     * Тип Г — одноразовое напоминание на точный момент. Отличия от других:
+     *   - Respect quiet hours управляется отдельным полем
+     *     singleReminderRespectQuietHours (default false).
+     *   - Recently_active фильтр пропускается, если момент был заказан
+     *     «скоро» (singleReminderAt - createdAt < 10 мин) — пользователь
+     *     явно хотел скоро, ждать 5 минут молчания глупо.
+     *   - После SENT пишется singleReminderSentAt и больше не триггерится.
+     */
+    public function sendSingleReminder(Task $task): SendResult
+    {
+        $user = $task->getUser();
+        $chatId = $user->getTelegramId();
+        if ($chatId === null || $chatId === '') {
+            return SendResult::SKIPPED_NO_CHAT_ID;
+        }
+
+        $now = $this->clock->now();
+
+        if ($task->getSingleReminderRespectQuietHours() && $user->isQuietHoursNow($now)) {
+            return SendResult::SKIPPED_QUIET_HOURS;
+        }
+
+        // Короткие single reminder'ы (от создания до триггера < 10 мин) —
+        // пользователь только что написал «напомни через 5 мин», активный
+        // диалог в recently_active заблокировал бы заказанное им же напоминание.
+        $at = $task->getSingleReminderAt();
+        $skipRecency = false;
+        if ($at !== null) {
+            $createdAt = $task->getCreatedAt();
+            $delta = $at->getTimestamp() - $createdAt->getTimestamp();
+            if ($delta < 10 * 60) {
+                $skipRecency = true;
+            }
+        }
+
+        if (!$skipRecency && $user->isRecentlyActive($now)) {
+            return SendResult::SKIPPED_RECENTLY_ACTIVE;
+        }
+
+        $text = $this->formatSingleText($task);
+        $keyboard = $this->buildKeyboard($task->getId()->toRfc4122());
+
+        $ok = $this->notifier->sendMessage(
+            chatId: (int) $chatId,
+            text: $text,
+            replyMarkup: $keyboard,
+        );
+
+        if (!$ok) {
+            return SendResult::FAILED;
+        }
+
+        $em = $this->doctrine->getManager();
+        if (!$em->contains($task)) {
+            $task = $em->find(Task::class, $task->getId());
+            if ($task === null) {
+                return SendResult::SENT;
+            }
+        }
+        $task->markSingleReminderSent($now);
+        $em->flush();
+
+        $this->logger->info('Single reminder sent', [
+            'task_id' => $task->getId()->toRfc4122(),
+            'at' => $at?->format('c'),
+        ]);
+
+        return SendResult::SENT;
+    }
+
+    private function formatSingleText(Task $task): string
+    {
+        $lines = ['🔔 Напоминаю:', ''];
+        $lines[] = "📝 {$task->getTitle()}";
+
+        $deadline = $task->getDeadline();
+        if ($deadline !== null) {
+            $userTz = new \DateTimeZone($task->getUser()->getTimezone());
+            $lines[] = '⏰ дедлайн ' . $deadline->setTimezone($userTz)->format('d.m H:i');
+        }
+
+        return implode("\n", $lines);
     }
 
     private function formatText(Task $task, \DateTimeImmutable $now): string

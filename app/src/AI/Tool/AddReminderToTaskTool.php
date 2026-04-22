@@ -120,6 +120,8 @@ class AddReminderToTaskTool implements AssistantTool
             }
         }
 
+        // Пользователь явно запросил напоминание — quiet hours не блокируют.
+        $task->setRespectQuietHours(false);
         $this->doctrine->getManager()->flush();
 
         $this->logger->info('Assistant add_reminder_to_task', [

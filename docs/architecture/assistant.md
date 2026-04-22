@@ -83,7 +83,7 @@ DTO результата: `replyText`, `toolsCalled` (имена tools в пор
 
 Регистрируется на fallback для текста без `/`. Отправляет «🤔 Думаю...», вызывает Assistant, редактирует сообщение на ответ. Исключения ловит и редактирует на «⚠️ Что-то пошло не так».
 
-## Tools (10 штук)
+## Tools (11 штук)
 
 Все в `App\AI\Tool\`, автоконфигурируются тегом `app.assistant_tool`. Общий
 helper `App\AI\Tool\Support\TaskLookup` — поиск по id или fuzzy query,
@@ -146,6 +146,18 @@ title (отсекая короткие слова и типовые глагол
 Подобрать задачи под время + контекст. Вызывает существующий
 `TaskAdvisor::suggest`. Input: `{available_minutes: int, context_description?: string}`. Возвращает список 2-5 предложений с reasoning.
 Без inline-кнопок — только текст (кнопочный UX доступен через команду `/free`).
+
+### `add_single_reminder`
+
+Установить одноразовое напоминание на точный момент (Тип Г). Input:
+`{task_id_or_query: string, at_iso: string (ISO 8601 с TZ пользователя), respect_quiet_hours?: bool default false}`.
+
+Отличается от `add_reminder_to_task`: там напоминание ПРИВЯЗАНО к дедлайну
+или периодическому расписанию. Здесь — просто «в HH:MM пришли уведомление»,
+задача при этом **остаётся активной** (в отличие от `snooze_task`).
+
+По умолчанию `respect_quiet_hours=false` — пользователь сам выбрал время,
+ночь не помеха. Перезаписывает предыдущий single-таймер если был.
 
 ## System prompt
 

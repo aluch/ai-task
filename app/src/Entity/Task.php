@@ -75,6 +75,34 @@ class Task
     #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $deadlineReminderSentAt = null;
 
+    /**
+     * Учитывать ли quiet hours пользователя для напоминаний по этой задаче
+     * (deadline + periodic + snooze wakeup). Когда пользователь ЯВНО выбирает
+     * время («отложи до 6:50», «напомни за час»), ассистент ставит false —
+     * спит пользователь или нет, он сам заказал этот момент.
+     */
+    #[ORM\Column(type: 'boolean', options: ['default' => true])]
+    private bool $respectQuietHours = true;
+
+    /**
+     * Одноразовое напоминание на конкретный момент (Тип Г). Независимо от
+     * дедлайна и периодических — отдельный таймер «в HH:MM напомнить про это».
+     * После отправки пишется в $singleReminderSentAt и больше не срабатывает.
+     */
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $singleReminderAt = null;
+
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $singleReminderSentAt = null;
+
+    /**
+     * Отдельный флаг quiet hours для single reminder. Default false потому что
+     * такой тип напоминаний всегда результат явного запроса пользователя
+     * («напомни в 6:50» — значит в 6:50, а не в 8:00 когда кончатся quiet).
+     */
+    #[ORM\Column(type: 'boolean', options: ['default' => false])]
+    private bool $singleReminderRespectQuietHours = false;
+
     /** @var Collection<int, TaskContext> */
     #[ORM\ManyToMany(targetEntity: TaskContext::class)]
     #[ORM\JoinTable(name: 'task_context_link')]
@@ -301,6 +329,70 @@ class Task
     public function markDeadlineReminderSent(): void
     {
         $this->deadlineReminderSentAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+    }
+
+    public function getRespectQuietHours(): bool
+    {
+        return $this->respectQuietHours;
+    }
+
+    public function setRespectQuietHours(bool $v): self
+    {
+        $this->respectQuietHours = $v;
+
+        return $this;
+    }
+
+    public function getSingleReminderAt(): ?\DateTimeImmutable
+    {
+        return $this->singleReminderAt;
+    }
+
+    public function setSingleReminderAt(?\DateTimeImmutable $at): self
+    {
+        $this->singleReminderAt = $at;
+
+        return $this;
+    }
+
+    public function getSingleReminderSentAt(): ?\DateTimeImmutable
+    {
+        return $this->singleReminderSentAt;
+    }
+
+    public function setSingleReminderSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->singleReminderSentAt = $at;
+
+        return $this;
+    }
+
+    public function markSingleReminderSent(\DateTimeImmutable $at): self
+    {
+        $this->singleReminderSentAt = $at->setTimezone(new \DateTimeZone('UTC'));
+
+        return $this;
+    }
+
+    public function getSingleReminderRespectQuietHours(): bool
+    {
+        return $this->singleReminderRespectQuietHours;
+    }
+
+    public function setSingleReminderRespectQuietHours(bool $v): self
+    {
+        $this->singleReminderRespectQuietHours = $v;
+
+        return $this;
+    }
+
+    public function shouldSendSingleReminder(\DateTimeImmutable $now): bool
+    {
+        if ($this->singleReminderAt === null || $this->singleReminderSentAt !== null) {
+            return false;
+        }
+
+        return $now >= $this->singleReminderAt;
     }
 
     public function shouldRemindBeforeDeadline(\DateTimeImmutable $now): bool
