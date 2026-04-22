@@ -56,6 +56,7 @@ final class ScenarioRunner
             'assistant-mark-done-ambiguous' => fn () => $this->assistantMarkDoneAmbiguous(),
             'assistant-block-tasks' => fn () => $this->assistantBlockTasks(),
             'assistant-suggest-tasks' => fn () => $this->assistantSuggestTasks(),
+            'assistant-fuzzy-russian-match' => fn () => $this->assistantFuzzyRussianMatch(),
         ];
     }
 
@@ -741,6 +742,57 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('assistant-suggest-tasks', 0);
+    }
+
+    /**
+     * Пользовательский запрос в другой форме слова, чем title задачи
+     * («пополнение» vs «Пополнить»). Старый стемминг обрезал ровно 2
+     * символа и не ловил разные части речи. TaskMatcher через Haiku
+     * должен справиться — но чтобы он реально вызывался, нужно ≥2 задач
+     * (иначе срабатывает early-return «одна задача → вернуть её»).
+     */
+    private function assistantFuzzyRussianMatch(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $em = $this->doctrine->getManager();
+        $target = new Task($user, 'Пополнить брокерский счёт ИИС');
+        $decoy1 = new Task($user, 'Купить билеты на концерт');
+        $decoy2 = new Task($user, 'Сходить в МФЦ за справкой');
+        $em->persist($target);
+        $em->persist($decoy1);
+        $em->persist($decoy2);
+        $em->flush();
+        $targetId = $target->getId();
+        $decoyIds = [$decoy1->getId(), $decoy2->getId()];
+
+        $r = $this->runAssistant($user, 'закрой задачу про пополнение счёта ИИС');
+
+        $freshTarget = $em->getRepository(Task::class)->find($targetId);
+        if ($freshTarget === null) {
+            return ScenarioResult::fail('assistant-fuzzy-russian-match', 0, 'target исчезла');
+        }
+        if ($freshTarget->getStatus() !== TaskStatus::DONE) {
+            return ScenarioResult::fail(
+                'assistant-fuzzy-russian-match',
+                0,
+                'целевая задача («Пополнить брокерский счёт ИИС») не помечена DONE, статус='
+                . $freshTarget->getStatus()->value . '. reply=' . mb_substr($r->replyText, 0, 180),
+            );
+        }
+        // Decoys должны остаться активными
+        foreach ($decoyIds as $id) {
+            $d = $em->getRepository(Task::class)->find($id);
+            if ($d !== null && $d->getStatus() === TaskStatus::DONE) {
+                return ScenarioResult::fail(
+                    'assistant-fuzzy-russian-match',
+                    0,
+                    'ошибочно закрыта decoy-задача «' . $d->getTitle() . '»',
+                );
+            }
+        }
+
+        return ScenarioResult::pass('assistant-fuzzy-russian-match', 0);
     }
 
     private function setupFreshAssistant(): User

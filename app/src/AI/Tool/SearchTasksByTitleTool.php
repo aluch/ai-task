@@ -5,16 +5,13 @@ declare(strict_types=1);
 namespace App\AI\Tool;
 
 use App\AI\Tool\Support\TaskLookup;
-use App\Entity\Task;
 use App\Entity\User;
-use Doctrine\Persistence\ManagerRegistry;
 
 class SearchTasksByTitleTool implements AssistantTool
 {
-    private const DEFAULT_LIMIT = 10;
+    private const DEFAULT_LIMIT = 5;
 
     public function __construct(
-        private readonly ManagerRegistry $doctrine,
         private readonly TaskLookup $lookup,
     ) {
     }
@@ -27,12 +24,14 @@ class SearchTasksByTitleTool implements AssistantTool
     public function getDescription(): string
     {
         return <<<'DESC'
-        Найти задачи пользователя по части названия или описания. Используй когда нужно
-        уточнить о какой именно задаче идёт речь (есть несколько похожих) или просто
-        показать релевантные «по теме».
+        Найти задачи пользователя по смыслу запроса. Используй когда нужно уточнить
+        о какой именно задаче идёт речь (есть несколько похожих) или показать
+        релевантные «по теме».
 
-        Ищет с морфо-стеммингом (обрезает последние 2 символа слов >3). Возвращает до
-        10 совпадений в любом статусе, с id, title, статусом и дедлайном.
+        Под капотом — семантический матчер через Haiku: понимает русскую морфологию
+        (падежи, времена, разные части речи: «пополнение» ≈ «пополнить», «стрижку»
+        ≈ «стрижка»). Ищет среди всех задач пользователя (любой статус). Возвращает
+        до 5 наиболее релевантных.
         DESC;
     }
 
@@ -43,7 +42,7 @@ class SearchTasksByTitleTool implements AssistantTool
             'properties' => [
                 'query' => [
                     'type' => 'string',
-                    'description' => 'Часть названия или описания.',
+                    'description' => 'Поисковый запрос на естественном языке.',
                 ],
             ],
             'required' => ['query'],
@@ -57,37 +56,8 @@ class SearchTasksByTitleTool implements AssistantTool
             return ToolResult::error('query обязателен.');
         }
 
-        // Пословный стемминг: каждое слово обрезаем отдельно и ищем по AND.
-        // Раньше обрезался конец всей строки — «купить билеты концерт» → «купить
-        // билеты конце» — и LIKE не находил «Купить билеты на концерт» потому
-        // что между «билеты» и «конце» в БД есть «на».
-        $words = preg_split('/\s+/u', mb_strtolower($query)) ?: [];
-        $roots = [];
-        foreach ($words as $w) {
-            if ($w === '') {
-                continue;
-            }
-            $roots[] = mb_strlen($w) > 3 ? mb_substr($w, 0, -2) : $w;
-        }
-        if ($roots === []) {
-            return ToolResult::ok("Ничего не найдено по запросу «{$query}».");
-        }
-
-        $em = $this->doctrine->getManager();
-        $qb = $em->getRepository(Task::class)
-            ->createQueryBuilder('t')
-            ->andWhere('t.user = :user')
-            ->setParameter('user', $user)
-            ->orderBy('t.createdAt', 'DESC')
-            ->setMaxResults(self::DEFAULT_LIMIT);
-
-        foreach ($roots as $i => $root) {
-            $p = 'q' . $i;
-            $qb->andWhere("LOWER(t.title) LIKE :{$p} OR LOWER(t.description) LIKE :{$p}")
-                ->setParameter($p, '%' . $root . '%');
-        }
-
-        $matches = $qb->getQuery()->getResult();
+        // По всем статусам — полезно когда пользователь ищет в т.ч. done/cancelled.
+        $matches = $this->lookup->findByQuery($user, $query, [], self::DEFAULT_LIMIT);
 
         if ($matches === []) {
             return ToolResult::ok("Ничего не найдено по запросу «{$query}».");

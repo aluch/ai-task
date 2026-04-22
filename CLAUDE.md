@@ -255,12 +255,14 @@ bot:
 - **Prompt caching** — `ClaudeClient::createMessage()` принимает флаги `cacheSystem` / `cacheTools` (Anthropic ephemeral cache, TTL 5 минут). Включено для `Assistant` (system + 11 tools, ~7k токенов) и `TaskAdvisor` (system, ~2k). Кешированные токены не учитываются в TPM rate-limit — критично на tier-1 (30k TPM у Sonnet). Stable-префиксы строго разделены: `Assistant` / `TaskAdvisor` вынесли текущее время (`now`) из system prompt в user message в теге `<context>`, иначе кэш инвалидировался бы каждую минуту. Порядок tools в `ToolRegistry` стабилизирован через `ksort` — перестановка tools тоже инвалидирует префикс. Подробности — `docs/architecture/ai-integration.md` § Prompt caching. Мониторинг: смотри `cache_read_tokens` в логах — если стабильно 0 при повторных запросах, ищи silent invalidator в system prompt.
 - `App\AI\TaskParser` — превращает свободный текст в `ParsedTaskDTO`. System prompt содержит текущее время пользователя, его timezone и список контекстов из БД. Ответ — JSON, парсится с fallback.
 - `App\AI\TaskAdvisor` — подбирает оптимальный набор задач под свободное время и контекст (для команды `/free`). Отличается от парсера: не извлечение, а рассуждение (приоритеты, маршруты, группировка). Используется Sonnet вместо Haiku. Подробности — `docs/architecture/task-advisor.md`.
+- `App\AI\TaskMatcher` — семантический поиск задач по пользовательскому запросу через Haiku. Загружает все активные задачи пользователя (обычно <50), даёт Haiku список title+id и запрос — возвращает task_ids в порядке релевантности. Ловит русскую морфологию: «пополнение счёта» ≈ «Пополнить счёт», «стрижку» ≈ «стрижка», разные части речи/падежи/времена. Используется через `TaskLookup::findByQuery` — при падении Haiku (429/5xx) fallback на стемминг-ILIKE. `TaskLookup::resolve` (который вызывается из большинства tool'ов — MarkTaskDone/Snooze/Update/Block/Unblock/AddReminder/AddSingleReminder) теперь поверх TaskMatcher. Стоимость <$0.001 за вызов.
 - `App\AI\Assistant` — AI-ассистент через tool calling. Обрабатывает свободный текст в Telegram через `AssistantHandler`, выбирает нужный tool на основе намерения пользователя, исполняет и отвечает по-человечески. Tool use loop до 5 итераций, retry на rate-limit/5xx от Anthropic. Подробности — `docs/architecture/assistant.md`.
 
   **Ассистент stateless** — нет памяти между сообщениями. Соответствующее правило в system prompt запрещает задавать пользователю уточняющие вопросы, требующие ответа в следующем сообщении («подтверди?», «создать новую или обновить?», «какую именно?»). Вместо этого — выбрать разумный вариант и сообщить что сделал, а при реальной неоднозначности дать подсказку-переформулировку: «Нашёл X и Y. Напиши конкретнее, например "сделано X"».
 
   Доступные tools (11 штук, все автоконфигурируются по тегу `app.assistant_tool`):
   - `create_task` — защита от дубликатов автоматическая, вопросов не задаёт: точный дубликат title (case-insensitive) → `DUPLICATE_SKIPPED` без создания; похожий (отличается деталью) → создаётся + в content упомянуты похожие. `force=true` обходит проверку exact-совпадения.
+  - `search_tasks_by_title` — семантический поиск через TaskMatcher (Haiku), понимает русскую морфологию.
   - `list_tasks` — фильтры по статусу + query.
   - `search_tasks_by_title` — fuzzy-поиск с морфо-стеммингом.
   - `update_task` — любое поле задачи; при смене дедлайна/remind_before сбрасывает `deadline_reminder_sent_at`.
@@ -282,6 +284,7 @@ bot:
 | Use case | Модель | Переменная |
 |---|---|---|
 | Парсинг задач | `claude-haiku-4-5` | `ANTHROPIC_MODEL_PARSER` |
+| Семантический матчер (TaskMatcher) | `claude-haiku-4-5` | `ANTHROPIC_MODEL_PARSER` (тот же) |
 | Подбор задач (`/free`) | `claude-sonnet-4-6` | `ANTHROPIC_MODEL_ADVISOR` |
 | Ассистент (свободный текст) | `claude-sonnet-4-6` | `ANTHROPIC_MODEL_ASSISTANT` |
 

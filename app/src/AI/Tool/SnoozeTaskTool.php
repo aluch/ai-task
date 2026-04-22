@@ -4,18 +4,17 @@ declare(strict_types=1);
 
 namespace App\AI\Tool;
 
-use App\Entity\Task;
+use App\AI\Tool\Support\TaskLookup;
 use App\Entity\User;
-use App\Enum\TaskStatus;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\Uid\Uuid;
 
 class SnoozeTaskTool implements AssistantTool
 {
     public function __construct(
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
+        private readonly TaskLookup $lookup,
     ) {
     }
 
@@ -27,9 +26,12 @@ class SnoozeTaskTool implements AssistantTool
     public function getDescription(): string
     {
         return <<<'DESC'
-        Отложить задачу на определённое время. Используй когда пользователь просит отложить, перенести, напомнить позже.
-        Принимает либо task_id (полный UUID), либо task_query (часть названия для поиска).
-        until_iso — ISO 8601 datetime с timezone пользователя (не UTC). Например, "2026-04-20T18:00:00+03:00".
+        Отложить задачу на определённое время. Используй когда пользователь просит
+        отложить, перенести, напомнить позже.
+        Принимает либо task_id (полный UUID), либо task_query — свободное описание
+        на естественном языке (семантический матчер через Haiku, понимает русскую
+        морфологию и разные формы слов).
+        until_iso — ISO 8601 datetime с timezone пользователя (не UTC).
         DESC;
     }
 
@@ -44,7 +46,7 @@ class SnoozeTaskTool implements AssistantTool
                 ],
                 'task_query' => [
                     'type' => 'string',
-                    'description' => 'Часть названия для поиска (case-insensitive).',
+                    'description' => 'Свободное описание задачи для семантического поиска.',
                 ],
                 'until_iso' => [
                     'type' => 'string',
@@ -53,20 +55,6 @@ class SnoozeTaskTool implements AssistantTool
             ],
             'required' => ['until_iso'],
         ];
-    }
-
-    /**
-     * Примитивный морфо-стемминг: отрезаем 2 последних символа если слово >3.
-     * «тренировку» → «тренировк» → находит «тренировка», «тренировки».
-     */
-    private function toSearchRoot(string $query): string
-    {
-        $normalized = mb_strtolower(trim($query));
-        if (mb_strlen($normalized) > 3) {
-            $normalized = mb_substr($normalized, 0, -2);
-        }
-
-        return $normalized;
     }
 
     public function execute(User $user, array $input): ToolResult
@@ -90,65 +78,24 @@ class SnoozeTaskTool implements AssistantTool
             return ToolResult::error('Время snooze должно быть в будущем.');
         }
 
-        $em = $this->doctrine->getManager();
-        $repo = $em->getRepository(Task::class);
-
         $taskId = isset($input['task_id']) ? trim((string) $input['task_id']) : '';
         $taskQuery = isset($input['task_query']) ? trim((string) $input['task_query']) : '';
 
-        $task = null;
-
-        if ($taskId !== '') {
-            if (!Uuid::isValid($taskId)) {
-                return ToolResult::error('Неверный формат UUID.');
-            }
-            $task = $repo->find(Uuid::fromString($taskId));
-            if ($task === null || !$task->getUser()->getId()->equals($user->getId())) {
-                return ToolResult::error('Задача не найдена.');
-            }
-        } elseif ($taskQuery !== '') {
-            $searchRoot = $this->toSearchRoot($taskQuery);
-            $matches = $repo->createQueryBuilder('t')
-                ->andWhere('t.user = :user')
-                ->andWhere('LOWER(t.title) LIKE :q')
-                ->andWhere('t.status IN (:open)')
-                ->setParameter('user', $user)
-                ->setParameter('q', '%' . $searchRoot . '%')
-                ->setParameter('open', [TaskStatus::PENDING, TaskStatus::IN_PROGRESS, TaskStatus::SNOOZED])
-                ->getQuery()
-                ->getResult();
-
-            $this->logger->info('snooze_task search', [
-                'query' => $taskQuery,
-                'search_root' => $searchRoot,
-                'found' => array_map(fn ($t) => [
-                    'id' => $t->getId()->toRfc4122(),
-                    'title' => $t->getTitle(),
-                ], $matches),
-            ]);
-
-            if ($matches === []) {
-                return ToolResult::error("Задача с «{$taskQuery}» не найдена.");
-            }
-            if (count($matches) > 1) {
-                $lines = ["Найдено несколько задач с «{$taskQuery}»:"];
-                foreach ($matches as $t) {
-                    $lines[] = "- [id:{$t->getId()->toRfc4122()}] {$t->getTitle()}";
-                }
-                $lines[] = 'Уточни какую именно.';
-
-                return ToolResult::error(implode("\n", $lines));
-            }
-            $task = $matches[0];
-        } else {
+        if ($taskId === '' && $taskQuery === '') {
             return ToolResult::error('Нужен task_id или task_query.');
         }
 
+        $found = $this->lookup->resolve($user, $taskId, $taskQuery);
+        if ($found instanceof ToolResult) {
+            return $found;
+        }
+        $task = $found;
+
+        $em = $this->doctrine->getManager();
         $task->snooze($untilUtc);
         // Пользователь явно выбрал время — quiet hours не применяем
-        // при разбуживании. Если автоматический snooze (через кнопку
-        // «отложить на час» в напоминании) хочет поведение по умолчанию,
-        // он использует Task::snooze() и не трогает respectQuietHours.
+        // при разбуживании. Автоматический snooze (кнопка «отложить на час»
+        // в напоминании) использует Task::snooze() и не трогает respectQuietHours.
         $task->setRespectQuietHours(false);
         $em->flush();
 

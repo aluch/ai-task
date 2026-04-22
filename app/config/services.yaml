@@ -52,6 +52,12 @@ services:
         arguments:
             $model: '%anthropic.model_assistant%'
 
+    # Использует ту же Haiku что TaskParser — семантический матчер задач
+    # (дешёвый, задача классификации не требует Sonnet).
+    App\AI\TaskMatcher:
+        arguments:
+            $model: '%anthropic.model_parser%'
+
     # Autoconfigure тегом все AssistantTool-реализации,
     # ToolRegistry собирает их через tagged_iterator.
     _instanceof:
