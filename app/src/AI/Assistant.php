@@ -32,16 +32,22 @@ class Assistant
     public function handle(User $user, string $userMessage, \DateTimeImmutable $now): AssistantResult
     {
         $userTz = new \DateTimeZone($user->getTimezone());
-        $systemPrompt = $this->buildSystemPrompt($now->setTimezone($userTz), $userTz);
+        // Systom prompt — только стабильный контент (инструкции + timezone).
+        // Текущее время идёт в user message, чтобы не инвалидировать
+        // prompt cache каждую минуту (nowStr — самый частый silent invalidator).
+        $systemPrompt = $this->buildSystemPrompt($userTz);
         $tools = $this->toolRegistry->getAnthropicSchemas();
 
+        $nowStr = $now->setTimezone($userTz)->format('Y-m-d H:i (l)');
         $messages = [
-            ['role' => 'user', 'content' => $userMessage],
+            ['role' => 'user', 'content' => "<context>Текущее время: {$nowStr}</context>\n\n{$userMessage}"],
         ];
 
         $toolsCalled = [];
         $totalInputTokens = 0;
         $totalOutputTokens = 0;
+        $totalCacheReadTokens = 0;
+        $totalCacheCreationTokens = 0;
         $iterations = 0;
 
         for ($i = 0; $i < self::MAX_ITERATIONS; $i++) {
@@ -53,6 +59,9 @@ class Assistant
                 $tools,
             );
 
+            $totalCacheReadTokens += $response->cacheReadInputTokens;
+            $totalCacheCreationTokens += $response->cacheCreationInputTokens;
+
             $totalInputTokens += $response->inputTokens;
             $totalOutputTokens += $response->outputTokens;
 
@@ -62,6 +71,15 @@ class Assistant
             // Если Claude не просит инструмент — это финальный ответ
             if ($stopReason !== 'tool_use') {
                 $text = $this->extractTextFromBlocks($contentBlocks);
+
+                $this->logger->info('Assistant completed', [
+                    'iterations' => $iterations,
+                    'tools_called' => $toolsCalled,
+                    'input_tokens' => $totalInputTokens,
+                    'cache_read_tokens' => $totalCacheReadTokens,
+                    'cache_creation_tokens' => $totalCacheCreationTokens,
+                    'output_tokens' => $totalOutputTokens,
+                ]);
 
                 return new AssistantResult(
                     replyText: $text !== '' ? $text : 'Готово.',
@@ -154,6 +172,8 @@ class Assistant
                     maxTokens: self::MAX_TOKENS,
                     temperature: self::TEMPERATURE,
                     tools: $tools,
+                    cacheSystem: true,
+                    cacheTools: true,
                 );
             } catch (ClaudeRateLimitException $e) {
                 $lastException = $e;
@@ -214,16 +234,16 @@ class Assistant
         return trim(implode('', $parts));
     }
 
-    private function buildSystemPrompt(\DateTimeImmutable $nowLocal, \DateTimeZone $userTz): string
+    private function buildSystemPrompt(\DateTimeZone $userTz): string
     {
-        $nowStr = $nowLocal->format('Y-m-d H:i (l)');
         $tzName = $userTz->getName();
 
         return <<<PROMPT
         Ты — персональный AI-ассистент по управлению задачами для пользователя.
 
-        Текущее время пользователя: {$nowStr} ({$tzName})
+        Часовой пояс пользователя: {$tzName}
         Язык общения: русский
+        Текущее время пользователя передаётся в первом user-сообщении в теге <context>.
 
         Твоя роль — понимать запросы пользователя на естественном языке и выполнять их через доступные инструменты. Пользователь пишет тебе свободным текстом, ты разбираешься что он хочет.
 

@@ -22,6 +22,9 @@ class ToolRegistry
         foreach ($tools as $tool) {
             $this->byName[$tool->getName()] = $tool;
         }
+        // Стабильный порядок — критично для prompt caching: любое изменение
+        // байт в префиксе (в т.ч. перестановка tools) инвалидирует кэш.
+        ksort($this->byName);
     }
 
     /**

@@ -57,18 +57,37 @@ class SearchTasksByTitleTool implements AssistantTool
             return ToolResult::error('query обязателен.');
         }
 
-        $root = $this->lookup->toSearchRoot($query);
+        // Пословный стемминг: каждое слово обрезаем отдельно и ищем по AND.
+        // Раньше обрезался конец всей строки — «купить билеты концерт» → «купить
+        // билеты конце» — и LIKE не находил «Купить билеты на концерт» потому
+        // что между «билеты» и «конце» в БД есть «на».
+        $words = preg_split('/\s+/u', mb_strtolower($query)) ?: [];
+        $roots = [];
+        foreach ($words as $w) {
+            if ($w === '') {
+                continue;
+            }
+            $roots[] = mb_strlen($w) > 3 ? mb_substr($w, 0, -2) : $w;
+        }
+        if ($roots === []) {
+            return ToolResult::ok("Ничего не найдено по запросу «{$query}».");
+        }
+
         $em = $this->doctrine->getManager();
-        $matches = $em->getRepository(Task::class)
+        $qb = $em->getRepository(Task::class)
             ->createQueryBuilder('t')
             ->andWhere('t.user = :user')
-            ->andWhere('LOWER(t.title) LIKE :q OR LOWER(t.description) LIKE :q')
             ->setParameter('user', $user)
-            ->setParameter('q', '%' . $root . '%')
             ->orderBy('t.createdAt', 'DESC')
-            ->setMaxResults(self::DEFAULT_LIMIT)
-            ->getQuery()
-            ->getResult();
+            ->setMaxResults(self::DEFAULT_LIMIT);
+
+        foreach ($roots as $i => $root) {
+            $p = 'q' . $i;
+            $qb->andWhere("LOWER(t.title) LIKE :{$p} OR LOWER(t.description) LIKE :{$p}")
+                ->setParameter($p, '%' . $root . '%');
+        }
+
+        $matches = $qb->getQuery()->getResult();
 
         if ($matches === []) {
             return ToolResult::ok("Ничего не найдено по запросу «{$query}».");

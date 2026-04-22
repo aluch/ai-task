@@ -28,6 +28,9 @@ class ClaudeClient
      * @param array<array{role: string, content: string|array}> $messages
      * @param array|null $tools список tool-деклараций в формате Anthropic API
      *   (каждая: {name, description, input_schema})
+     * @param bool $cacheSystem пометить system prompt как кешируемый (ephemeral)
+     * @param bool $cacheTools пометить tools как кешируемые (cache_control на
+     *   последнем tool — Anthropic кэширует всё, что выше последнего маркера)
      */
     public function createMessage(
         string $systemPrompt,
@@ -36,6 +39,8 @@ class ClaudeClient
         int $maxTokens = 1024,
         ?float $temperature = null,
         ?array $tools = null,
+        bool $cacheSystem = false,
+        bool $cacheTools = false,
     ): ClaudeResponse {
         $model ??= self::DEFAULT_MODEL;
         $start = microtime(true);
@@ -43,15 +48,32 @@ class ClaudeClient
         $body = [
             'model' => $model,
             'max_tokens' => $maxTokens,
-            'system' => $systemPrompt,
             'messages' => $messages,
         ];
+
+        if ($cacheSystem) {
+            $body['system'] = [
+                [
+                    'type' => 'text',
+                    'text' => $systemPrompt,
+                    'cache_control' => ['type' => 'ephemeral'],
+                ],
+            ];
+        } else {
+            $body['system'] = $systemPrompt;
+        }
 
         if ($temperature !== null) {
             $body['temperature'] = $temperature;
         }
 
         if ($tools !== null && $tools !== []) {
+            if ($cacheTools) {
+                // cache_control на последнем tool в массиве — Anthropic
+                // кэширует всё что до последнего маркера по префиксу.
+                $lastIndex = array_key_last($tools);
+                $tools[$lastIndex]['cache_control'] = ['type' => 'ephemeral'];
+            }
             $body['tools'] = $tools;
         }
 
@@ -115,12 +137,17 @@ class ClaudeClient
         }
 
         $text = $this->extractText($data);
-        $inputTokens = $data['usage']['input_tokens'] ?? 0;
-        $outputTokens = $data['usage']['output_tokens'] ?? 0;
+        $usage = $data['usage'] ?? [];
+        $inputTokens = $usage['input_tokens'] ?? 0;
+        $outputTokens = $usage['output_tokens'] ?? 0;
+        $cacheCreationTokens = $usage['cache_creation_input_tokens'] ?? 0;
+        $cacheReadTokens = $usage['cache_read_input_tokens'] ?? 0;
 
         $this->logger->info('Claude API call', [
             'model' => $model,
             'input_tokens' => $inputTokens,
+            'cache_read_tokens' => $cacheReadTokens,
+            'cache_creation_tokens' => $cacheCreationTokens,
             'output_tokens' => $outputTokens,
             'elapsed' => $elapsed,
             'stop_reason' => $data['stop_reason'] ?? 'unknown',
@@ -131,6 +158,8 @@ class ClaudeClient
             stopReason: $data['stop_reason'] ?? 'unknown',
             inputTokens: $inputTokens,
             outputTokens: $outputTokens,
+            cacheCreationInputTokens: $cacheCreationTokens,
+            cacheReadInputTokens: $cacheReadTokens,
             data: $data,
         );
     }

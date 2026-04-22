@@ -42,15 +42,19 @@ class TaskAdvisor
         }
 
         $userTz = new \DateTimeZone($user->getTimezone());
-        $systemPrompt = $this->buildSystemPrompt(
-            $now->setTimezone($userTz),
+        // System prompt — только стабильные инструкции и timezone (кешируется).
+        // Per-request данные (время, available_minutes, контекст, excluded_ids,
+        // список задач) — в user message.
+        $systemPrompt = $this->buildSystemPrompt($userTz);
+
+        $userPrompt = $this->buildUserPrompt(
+            $tasks,
+            $now,
             $userTz,
             $availableMinutes,
             $contextDescription,
             $excludeTaskIds,
         );
-
-        $userPrompt = $this->buildUserPrompt($tasks, $now, $userTz);
 
         $response = $this->callWithRetry($systemPrompt, $userPrompt);
 
@@ -74,6 +78,7 @@ class TaskAdvisor
                     model: $this->model,
                     maxTokens: 2048,
                     temperature: 0.3,
+                    cacheSystem: true,
                 );
             } catch (ClaudeRateLimitException $e) {
                 $last = $e;
@@ -95,33 +100,16 @@ class TaskAdvisor
         throw $last;
     }
 
-    private function buildSystemPrompt(
-        \DateTimeImmutable $nowLocal,
-        \DateTimeZone $userTz,
-        int $availableMinutes,
-        ?string $contextDescription,
-        array $excludeTaskIds,
-    ): string {
-        $nowStr = $nowLocal->format('Y-m-d H:i (l)');
+    private function buildSystemPrompt(\DateTimeZone $userTz): string
+    {
         $tzName = $userTz->getName();
-
-        $contextLine = $contextDescription !== null && $contextDescription !== ''
-            ? "Контекст пользователя: {$contextDescription}"
-            : 'Контекст не указан — можно предлагать любые задачи по другим критериям.';
-
-        $excludedLine = '';
-        if ($excludeTaskIds !== []) {
-            $excludedLine = "\n\nНЕ предлагай эти task_id (уже отвергнуты пользователем):\n" .
-                implode("\n", array_map(fn ($id) => "  - {$id}", $excludeTaskIds));
-        }
 
         return <<<PROMPT
         Ты AI-помощник по управлению задачами. Пользователь сообщил, сколько у него свободного времени и где он находится. Твоя задача — подобрать из его открытых задач оптимальный набор, который он реально сможет сделать прямо сейчас.
 
-        Текущее время: {$nowStr}
-        Часовой пояс: {$tzName}
-        Доступное время: {$availableMinutes} минут
-        {$contextLine}{$excludedLine}
+        Часовой пояс пользователя: {$tzName}
+
+        Per-request данные (текущее время, доступное время, контекст пользователя, отвергнутые task_ids, список задач) приходят в user-сообщении в тегах <context> / <available_tasks>.
 
         Отвечай строго JSON без markdown-обёрток, без пояснений, без preamble. Только JSON-объект:
 
@@ -182,9 +170,28 @@ class TaskAdvisor
 
     /**
      * @param Task[] $tasks
+     * @param string[] $excludeTaskIds
      */
-    private function buildUserPrompt(array $tasks, \DateTimeImmutable $now, \DateTimeZone $userTz): string
-    {
+    private function buildUserPrompt(
+        array $tasks,
+        \DateTimeImmutable $now,
+        \DateTimeZone $userTz,
+        int $availableMinutes,
+        ?string $contextDescription,
+        array $excludeTaskIds,
+    ): string {
+        $nowStr = $now->setTimezone($userTz)->format('Y-m-d H:i (l)');
+
+        $contextLine = $contextDescription !== null && $contextDescription !== ''
+            ? "Контекст пользователя: {$contextDescription}"
+            : 'Контекст не указан — можно предлагать любые задачи по другим критериям.';
+
+        $excludedLine = '';
+        if ($excludeTaskIds !== []) {
+            $excludedLine = "\nНЕ предлагай эти task_id (уже отвергнуты пользователем):\n" .
+                implode("\n", array_map(fn ($id) => "  - {$id}", $excludeTaskIds));
+        }
+
         $items = [];
         foreach ($tasks as $task) {
             $deadline = $task->getDeadline();
@@ -205,7 +212,7 @@ class TaskAdvisor
 
         $json = json_encode($items, \JSON_UNESCAPED_UNICODE | \JSON_PRETTY_PRINT);
 
-        return "<available_tasks>\n{$json}\n</available_tasks>";
+        return "<context>\nТекущее время: {$nowStr}\nДоступное время: {$availableMinutes} минут\n{$contextLine}{$excludedLine}\n</context>\n\n<available_tasks>\n{$json}\n</available_tasks>";
     }
 
     /**
