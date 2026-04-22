@@ -35,7 +35,8 @@ Telegram-бот с интеграцией Claude API для управления
 - `make bot-restart` — перезапуск бота
 - `make scheduler-logs` — логи scheduler-воркера (напоминания)
 - `make scheduler-restart` — перезапуск scheduler
-- `make cache-clear` — очистить `var/cache/prod/` (на случай prod-прогонов)
+- `make cache-clear` — аварийная очистка Symfony-кэша (bot + scheduler + php) + рестарт. Использовать при ошибках вида `Failed opening required .../ContainerXXX/...Service.php` или stale-DI после рефакторинга.
+- `make cache-rebuild` — то же + warmup dev-кэша в php-контейнере (быстрее чем ждать первого запроса).
 - `make smoke-all` — прогнать все smoke-сценарии (8 штук). Подробности — `docs/testing/smoke.md`
 - `make smoke-reset` — удалить тестового пользователя (telegram_id=999999999)
 - `make smoke-assistant msg="..."` — разовый прогон Assistant от имени тест-юзера
@@ -67,6 +68,8 @@ Telegram-бот с интеграцией Claude API для управления
     4. **`restart: always`** — `on-failure` НЕ рестартит graceful exit (code 0). `--time-limit=3600` у messenger'а завершает worker корректно каждый час, и с `on-failure` scheduler тихо умирал на 60 минуте, и никто не видел пока не приходил разбор. С `always` гарантированно поднимается.
 
   **Не переключай scheduler на `prod` или `debug=1` для локальной разработки** — это возвращает один из двух классов багов (см. инциденты 2026-04-22).
+
+- **Изолированный Symfony-кэш на контейнер.** `var/cache` у bot/scheduler/php хранится в отдельных named volumes (`bot_cache`, `scheduler_cache`, `php_cache`), которые перекрывают общий bind mount `./app:/var/www/app`. Без этого при параллельной пересборке dev-кэша (после правки кода) возникал race: один контейнер удалял файл сервиса, другой читал ссылку из своего уже-пересобранного контейнера → `Failed opening required .../ContainerXXX/...Service.php`. Dockerfile прописывает `chown -R 1000:1000 /var/www/app/var`, чтобы named volume при первом создании наследовал права uid 1000 (иначе smoke-команды от `--user 1000:1000` падают с permission denied). При stale-DI или storm-ошибках: `make cache-clear` (вычищает все три volume + рестарт).
 - **Long-running процессы и Doctrine.** В коде, который живёт дольше одного HTTP-запроса (Telegram-бот, Messenger воркеры, планировщик), **никогда не инжектить `EntityManagerInterface` напрямую** и **никогда не инжектить Doctrine-репозитории через конструктор**. Репозитории (`ServiceEntityRepository`) захватывают EM в свойство `$_em` при старте — после `$registry->resetManager()` внутри репо остаётся stale ссылка, find() возвращает сущность в identity map старого EM, а flush по текущему EM молча не пишет ничего. Правильный паттерн для любой работы с сущностями:
 
   ```php

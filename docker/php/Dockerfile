@@ -32,6 +32,14 @@ COPY php-cli.ini /usr/local/etc/php/php-cli.ini
 
 WORKDIR /var/www/app
 
+# Заблаговременно создать var/cache и var/log с правами uid 1000 (хостовый
+# пользователь). Named volumes (bot_cache/scheduler_cache/php_cache) при
+# первом создании наследуют владельца этой директории в образе — так
+# smoke-команды от --user 1000:1000 могут писать в cache без
+# permission denied.
+RUN mkdir -p /var/www/app/var/cache /var/www/app/var/log \
+    && chown -R 1000:1000 /var/www/app/var
+
 EXPOSE 9000
 
 CMD ["php-fpm"]

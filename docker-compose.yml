@@ -30,6 +30,10 @@ services:
   php:
     <<: *php-service
     container_name: ai-task-php
+    # Отдельный cache volume — см. комментарий у bot'а ниже.
+    volumes:
+      - ./app:/var/www/app:cached
+      - php_cache:/var/www/app/var/cache
 
   nginx:
     image: nginx:1.27-alpine
@@ -80,9 +84,21 @@ services:
     # Nutgram polling loop тоже long-running процесс, TraceableEventDispatcher
     # на нём пока не ловился, но профилактика лишней не будет.
     # cache:clear на старте — свежий DI после изменения кода/сервисов.
+    #
+    # Изолированный cache volume (bot_cache): bind mount ./app монтирует
+    # var/cache вместе со всем кодом, а bot/scheduler/php все пересобирают
+    # dev-кэш параллельно при старте. Если var/cache общий, получается
+    # race condition: контейнер DI ссылается на файл сервиса, который
+    # другой контейнер только что удалил → ошибка «Failed opening required
+    # .../getDoctrine_Dbal_DefaultConnectionService.php». Отдельный
+    # named volume на var/cache отрезает эту папку от bind mount —
+    # каждый контейнер пересобирает свой кэш независимо.
     environment:
       APP_ENV: dev
       APP_DEBUG: 0
+    volumes:
+      - ./app:/var/www/app:cached
+      - bot_cache:/var/www/app/var/cache
     command: sh -c 'php bin/console cache:clear --env=dev --no-warmup 2>/dev/null; php bin/console app:bot:run -vv'
     restart: always
     stop_grace_period: 35s
@@ -106,6 +122,9 @@ services:
     environment:
       APP_ENV: dev
       APP_DEBUG: 0
+    volumes:
+      - ./app:/var/www/app:cached
+      - scheduler_cache:/var/www/app/var/cache
     command: sh -c 'php bin/console cache:clear --env=dev --no-warmup 2>/dev/null; php bin/console messenger:consume scheduler_reminders --time-limit=3600'
     restart: always
 
@@ -126,6 +145,10 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  # Изолированный Symfony cache на контейнер — см. bot.volumes.
+  bot_cache:
+  scheduler_cache:
+  php_cache:
 
 networks:
   ai-task:
