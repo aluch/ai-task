@@ -24,7 +24,7 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 #[AsCommand(
     name: 'app:smoke:reminder-tick',
-    description: 'Вручную прогнать один tick scheduler handler\'а. --type=deadline|periodic|snooze|all.',
+    description: 'Вручную прогнать один tick scheduler handler\'а. --type=deadline|periodic|snooze|single|all.',
 )]
 final class SmokeReminderTickCommand extends Command
 {
@@ -42,7 +42,7 @@ final class SmokeReminderTickCommand extends Command
     protected function configure(): void
     {
         $this
-            ->addOption('type', null, InputOption::VALUE_REQUIRED, 'deadline | periodic | snooze | all', 'all')
+            ->addOption('type', null, InputOption::VALUE_REQUIRED, 'deadline | periodic | snooze | single | all', 'all')
             ->addOption('now', null, InputOption::VALUE_REQUIRED, 'Фиксированный «сейчас». Пример: "2026-04-20 15:00 UTC".')
             ->addOption('include-real-users', null, InputOption::VALUE_NONE, 'Не фильтровать кандидатов по test-user\'у. Полезно для отладки prod-данных.');
     }
@@ -85,6 +85,12 @@ final class SmokeReminderTickCommand extends Command
         if ($type === 'snooze' || $type === 'all') {
             $this->tick($io, 'snooze', $filter($repo->findSnoozeWakeupCandidates($now)), function (Task $t) {
                 return $this->sender->sendSnoozeWakeup($t);
+            });
+        }
+
+        if ($type === 'single' || $type === 'all') {
+            $this->tick($io, 'single', $filter($repo->findSingleReminderCandidates($now)), function (Task $t) {
+                return $this->sender->sendSingleReminder($t);
             });
         }
 

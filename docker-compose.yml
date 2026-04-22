@@ -76,27 +76,38 @@ services:
   bot:
     <<: *php-service
     container_name: ai-task-bot
-    command: php bin/console app:bot:run -vv
-    restart: on-failure
+    # APP_ENV=dev + APP_DEBUG=0: те же соображения что у scheduler.
+    # Nutgram polling loop тоже long-running процесс, TraceableEventDispatcher
+    # на нём пока не ловился, но профилактика лишней не будет.
+    # cache:clear на старте — свежий DI после изменения кода/сервисов.
+    environment:
+      APP_ENV: dev
+      APP_DEBUG: 0
+    command: sh -c 'php bin/console cache:clear --env=dev --no-warmup 2>/dev/null; php bin/console app:bot:run -vv'
+    restart: always
     stop_grace_period: 35s
 
   scheduler:
     <<: *php-service
     container_name: ai-task-scheduler
-    # APP_ENV=dev, APP_DEBUG=0: dev-окружение автоматически инвалидирует
-    # DI-кэш при изменениях в коде (новые конструкторы подхватываются без
-    # ручного cache:clear), а debug=0 отключает TraceableEventDispatcher,
-    # из-за которого в Symfony 7.4 падал messenger worker loop с
-    # «Undefined array key WorkerRunningEvent». Получаем лучшее из двух:
-    # свежий DI + чистая обработка событий.
+    # APP_ENV=dev + APP_DEBUG=0:
+    # - dev: при кэш-промахе компилируется актуальный DI-container
+    #   (при APP_DEBUG=1 было бы ещё и автоматически на mtime-изменениях,
+    #   но debug=1 включает TraceableEventDispatcher, у которого в
+    #   Symfony 7.4 баг с WorkerRunningEvent ломает messenger worker loop).
+    # - debug=0: TraceableEventDispatcher не подключается. Чтобы
+    #   компенсировать отсутствие автоинвалидации, на старте делаем
+    #   cache:clear --no-warmup — каждый restart даёт свежий DI.
     #
-    # --time-limit=3600: воркер сам завершится через час, Docker
-    # перезапустит — защита от утечек памяти в long-running процессе.
+    # --time-limit=3600 + restart: always: воркер сам завершается через
+    # час (защита от memory leak). `on-failure` НЕ рестартит graceful
+    # exit (code 0) — из-за чего scheduler тихо умирал после первого часа.
+    # `always` гарантирует поднятие в любом случае.
     environment:
       APP_ENV: dev
       APP_DEBUG: 0
-    command: php bin/console messenger:consume scheduler_reminders --time-limit=3600
-    restart: on-failure
+    command: sh -c 'php bin/console cache:clear --env=dev --no-warmup 2>/dev/null; php bin/console messenger:consume scheduler_reminders --time-limit=3600'
+    restart: always
 
   adminer:
     image: adminer:latest
