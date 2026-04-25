@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace App\Smoke;
 
 use App\AI\Assistant;
+use App\AI\ConfirmationExecutor;
 use App\AI\ConversationHistoryStore;
 use App\AI\DTO\HistoryMessage;
+use App\AI\DTO\PendingAction;
+use App\AI\PendingActionStore;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Enum\TaskPriority;
@@ -41,6 +44,8 @@ final class ScenarioRunner
         private readonly ReminderSender $sender,
         private readonly Assistant $assistant,
         private readonly ConversationHistoryStore $historyStore,
+        private readonly PendingActionStore $pendingStore,
+        private readonly ConfirmationExecutor $confirmExecutor,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -67,6 +72,10 @@ final class ScenarioRunner
             'assistant-reply-context' => fn () => $this->assistantReplyContext(),
             'assistant-history-ttl' => fn () => $this->assistantHistoryTtl(),
             'assistant-reset-command' => fn () => $this->assistantResetCommand(),
+            'assistant-confirm-create-batch' => fn () => $this->assistantConfirmCreateBatch(),
+            'assistant-confirm-cancel-no' => fn () => $this->assistantConfirmCancelNo(),
+            'assistant-confirm-ttl-expired' => fn () => $this->assistantConfirmTtlExpired(),
+            'assistant-no-confirm-for-single' => fn () => $this->assistantNoConfirmForSingle(),
         ];
     }
 
@@ -949,6 +958,164 @@ final class ScenarioRunner
         return ScenarioResult::pass('assistant-reset-command', 0);
     }
 
+    /**
+     * Множественное создание задач: tool create_task должен вернуть
+     * PENDING_CONFIRMATION, ассистент — вставить маркер [CONFIRM:<id>].
+     * До подтверждения — задачи в БД нет. После симуляции «yes» — есть.
+     */
+    private function assistantConfirmCreateBatch(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $r = $this->runAssistant($user, 'Создай 3 задачи: купить хлеб, позвонить маме, забрать посылку');
+
+        if (preg_match('/\[CONFIRM:([a-f0-9]{8})\]/', $r->replyText, $m) !== 1) {
+            return ScenarioResult::fail(
+                'assistant-confirm-create-batch',
+                0,
+                'нет маркера [CONFIRM:...] в reply: ' . mb_substr($r->replyText, 0, 200),
+            );
+        }
+        $confirmId = $m[1];
+
+        // В БД пока ничего не создано
+        $tasksBefore = $this->userTasks($user);
+        if (count($tasksBefore) > 0) {
+            return ScenarioResult::fail(
+                'assistant-confirm-create-batch',
+                0,
+                'до подтверждения уже создано задач: ' . count($tasksBefore),
+            );
+        }
+
+        // Pending в Redis
+        $action = $this->pendingStore->get($confirmId);
+        if ($action === null || $action->actionType !== 'create_tasks_batch') {
+            return ScenarioResult::fail(
+                'assistant-confirm-create-batch',
+                0,
+                'pending action не найден или неверного типа',
+            );
+        }
+
+        // Симулируем нажатие «Подтверждаю» (consume + execute через executor).
+        $consumed = $this->pendingStore->consume($confirmId);
+        $resultText = $this->confirmExecutor->execute($user, $consumed);
+
+        $tasksAfter = $this->userTasks($user);
+        if (count($tasksAfter) < 2) {
+            return ScenarioResult::fail(
+                'assistant-confirm-create-batch',
+                0,
+                "после подтверждения создано {$tasksBefore} задач (ожидалось 2-3). result: " . mb_substr($resultText, 0, 100),
+            );
+        }
+
+        return ScenarioResult::pass('assistant-confirm-create-batch', 0);
+    }
+
+    /**
+     * Отмена при cancel_task: пользователь нажал «Отмена», задача
+     * остаётся PENDING (не отменена).
+     */
+    private function assistantConfirmCancelNo(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $em = $this->doctrine->getManager();
+        $task = new Task($user, 'Помыть машину');
+        $em->persist($task);
+        $em->flush();
+        $taskId = $task->getId();
+
+        $r = $this->runAssistant($user, 'Отмени задачу помыть машину');
+
+        if (preg_match('/\[CONFIRM:([a-f0-9]{8})\]/', $r->replyText, $m) !== 1) {
+            return ScenarioResult::fail(
+                'assistant-confirm-cancel-no',
+                0,
+                'нет маркера [CONFIRM:...] в reply: ' . mb_substr($r->replyText, 0, 200),
+            );
+        }
+        $confirmId = $m[1];
+
+        // Симулируем «Отмена» — просто consume без execute.
+        $this->pendingStore->consume($confirmId);
+
+        $em->refresh($task);
+        if ($task->getStatus() === TaskStatus::CANCELLED) {
+            return ScenarioResult::fail(
+                'assistant-confirm-cancel-no',
+                0,
+                'задача отменена несмотря на "no"',
+            );
+        }
+
+        return ScenarioResult::pass('assistant-confirm-cancel-no', 0);
+    }
+
+    /**
+     * Истёкший pending: после consume() (имитация TTL) повторный
+     * consume должен вернуть null. Executor вызвать нельзя.
+     */
+    private function assistantConfirmTtlExpired(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        // Создаём pending руками, не через ассистента (детерминированно)
+        $action = new PendingAction(
+            userId: $user->getId()->toRfc4122(),
+            actionType: 'cancel_task',
+            description: 'тест',
+            payload: ['task_id' => 'fake'],
+            createdAt: new \DateTimeImmutable('now', new \DateTimeZone('UTC')),
+        );
+        $confirmId = $this->pendingStore->create($user, $action);
+
+        // Имитация TTL — просто удаляем
+        $this->pendingStore->consume($confirmId);
+
+        // Повторный consume → null
+        $second = $this->pendingStore->consume($confirmId);
+        if ($second !== null) {
+            return ScenarioResult::fail(
+                'assistant-confirm-ttl-expired',
+                0,
+                'повторный consume вернул action вместо null',
+            );
+        }
+
+        return ScenarioResult::pass('assistant-confirm-ttl-expired', 0);
+    }
+
+    /**
+     * Регресс: одиночное создание задачи НЕ должно требовать подтверждения.
+     */
+    private function assistantNoConfirmForSingle(): ScenarioResult
+    {
+        $user = $this->setupFreshAssistant();
+
+        $r = $this->runAssistant($user, 'Создай задачу купить молоко');
+
+        if (preg_match('/\[CONFIRM:([a-f0-9]{8})\]/', $r->replyText) === 1) {
+            return ScenarioResult::fail(
+                'assistant-no-confirm-for-single',
+                0,
+                'одиночная задача неожиданно потребовала подтверждение',
+            );
+        }
+        $tasks = $this->userTasks($user);
+        if (count($tasks) !== 1) {
+            return ScenarioResult::fail(
+                'assistant-no-confirm-for-single',
+                0,
+                'ожидалась 1 задача, найдено ' . count($tasks),
+            );
+        }
+
+        return ScenarioResult::pass('assistant-no-confirm-for-single', 0);
+    }
+
     private function setupFreshAssistant(): User
     {
         $this->harness->reset();
@@ -957,6 +1124,7 @@ final class ScenarioRunner
         // реалистичный now, не quiet hours
         $this->harness->freezeTimeAt(new \DateTimeImmutable('2026-06-15 12:00:00 UTC'));
         $this->historyStore->clear($user);
+        $this->pendingStore->clear($user);
         $this->msgIdCounter = 1000;
 
         return $user;

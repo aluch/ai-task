@@ -147,7 +147,29 @@ DTO результата: `replyText`, `toolsCalled` (имена tools в пор
 - `Assistant reply target not found in history` — если Reply указал на исчезнувшее сообщение.
 - `Assistant history reset` — при `/reset` с `size_before`.
 
-## Tools (11 штук)
+## Подтверждения операций
+
+Рискованные и массовые операции исполняются в два шага: tool сохраняет описание операции в Redis (`PendingActionStore`) и возвращает в Claude префикс `PENDING_CONFIRMATION:<type>:<id>`. Ассистент формулирует понятный текст для пользователя и вставляет маркер `[CONFIRM:<id>]` (8 hex). `AssistantHandler` парсит маркер, заменяет его на inline-кнопки `✅ Подтверждаю / ❌ Отмена` (callback `confirm:<id>:yes|no`).
+
+**Tools, требующие подтверждения:**
+
+| Tool | actionType | Когда |
+|---|---|---|
+| `create_task` (`tasks` ≥ 2) | `create_tasks_batch` | Массовое создание задач за один вызов |
+| `cancel_task` | `cancel_task` | Отмена задачи (статус CANCELLED) |
+| `bulk_operation` (`mark_done`/`snooze`/`set_priority`/`cancel`) | `bulk_<op>` | Массовые действия над несколькими задачами |
+
+**Что НЕ требует подтверждения:** одиночное создание, mark_done одной, snooze одной, update полей, add_reminder, block/unblock, list/search/suggest/deps.
+
+**Хранилище** (`PendingActionStore`): Redis, ключ `pending_action:<short_id>`, TTL 5 минут. Дополнительный индекс `pending_action_user:<uuid>` → последний `short_id` (для текстового подтверждения «да»).
+
+**Исполнение** (`ConfirmationExecutor`): единая точка для callback и текста. На «yes» — `consume()` (атомарно), вызов `execute(User, PendingAction)` → строка результата. На «no» — `consume()` без исполнения, ответ «👌 Отменено».
+
+**Текстовое подтверждение.** В `AssistantHandler::__invoke` проверяется: если у user'а есть свежий `latestForUser` и текст ∈ {«да», «ок», «подтверждаю», «давай», «yes», «+», «ага», «угу», «согласен»} (case-insensitive) — обработать как кнопку yes. Аналогично для «нет», «отмена», «no» и т.д. Если текст не совпал ни с чем — обычный flow Ассистента, pending остаётся в Redis до TTL.
+
+**Истечение TTL.** После 5 минут ключ исчезает из Redis. При нажатии кнопки или текстовом «да» `consume()` вернёт null → ответ «⏰ Действие устарело — попроси заново».
+
+## Tools (13 штук)
 
 Все в `App\AI\Tool\`, автоконфигурируются тегом `app.assistant_tool`. Общий
 helper `App\AI\Tool\Support\TaskLookup` — поиск по id или fuzzy query,

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Telegram\Handler\BlockHandler;
+use App\Telegram\Handler\ConfirmationCallbackHandler;
 use App\Telegram\Handler\DependencyCallbackHandler;
 use App\Telegram\Handler\DepsHandler;
 use App\Telegram\Handler\DoneHandler;
@@ -44,6 +45,7 @@ class HandlerRegistry
         private readonly FreeCallbackHandler $freeCallbackHandler,
         private readonly AssistantHandler $assistantHandler,
         private readonly ResetHandler $resetHandler,
+        private readonly ConfirmationCallbackHandler $confirmCallbackHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
         private readonly TelegramUserResolver $userResolver,
@@ -104,6 +106,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('free:{data}', $this->freeCallbackHandler);
         $bot->onCallbackQueryData('list:{data}', $this->listCallbackHandler);
         $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
+        $bot->onCallbackQueryData('confirm:{data}', $this->confirmCallbackHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;

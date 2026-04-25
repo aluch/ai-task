@@ -281,6 +281,19 @@ class Task
         return $this;
     }
 
+    /**
+     * Отменить задачу — задача больше не актуальна (в отличие от done,
+     * которое означает «выполнено»). Используем то же поле completedAt
+     * как «момент закрытия» для статистики/отчётов.
+     */
+    public function cancel(): self
+    {
+        $this->status = TaskStatus::CANCELLED;
+        $this->completedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        return $this;
+    }
+
     public function getSnoozedUntil(): ?\DateTimeImmutable
     {
         return $this->snoozedUntil;

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\AI\Tool;
 
+use App\AI\DTO\PendingAction;
+use App\AI\PendingActionStore;
 use App\AI\TaskParser;
 use App\Entity\Task;
 use App\Entity\TaskContext;
@@ -19,6 +21,7 @@ class CreateTaskTool implements AssistantTool
         private readonly TaskParser $taskParser,
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
+        private readonly PendingActionStore $pendingStore,
     ) {
     }
 
@@ -30,23 +33,25 @@ class CreateTaskTool implements AssistantTool
     public function getDescription(): string
     {
         return <<<'DESC'
-        Создать новую задачу для пользователя. Используй когда пользователь описывает
-        что-то, что ему нужно сделать. Извлекай структуру (заголовок, дедлайн,
-        приоритет, контексты) из исходного текста — TaskParser сделает это автоматически.
-        Передавай raw_text = полный текст пользователя с описанием задачи.
+        Создать одну или несколько новых задач. Параметр `tasks` — массив:
+        каждый элемент {raw_text} = исходный текст одной задачи. Поле `raw_text`
+        в корне tool'а тоже поддерживается (для одной задачи, обратная совместимость).
 
-        Защита от дубликатов (автоматическая, вопросов пользователю не задавай):
+        Логика:
+        - 1 задача → создаётся сразу. Логика дубликатов как раньше (DUPLICATE_SKIPPED
+          для exact, упоминание похожих, force=true).
+        - 2+ задач → tool возвращает PENDING_CONFIRMATION:create_tasks_batch:<id>
+          с превью. В reply сформулируй человеческое подтверждение и обязательно
+          вставь маркер [CONFIRM:<id>] — он превратится в кнопки.
+
+        Защита от дубликатов для одиночных:
         - Точный дубликат (title идентичен активной задаче, case-insensitive) — НЕ
           создаётся. Tool вернёт success=true, но content начнётся с «DUPLICATE_SKIPPED».
           В этом случае: в reply ЧЁТКО сообщи что задача уже есть, НЕ пиши «готово»,
-          «создал», «добавил» — ничего не создавалось. Пример: «Такая задача уже
-          есть. Если хотел отдельную (например "молоко на даче") — напиши с уточнением».
-        - Похожие, но не идентичные (отличается уточнением: «молоко» vs «молоко на
-          даче») — создаётся новая задача, в content будут упомянуты похожие.
-          Передай пользователю что создал, и что похожие уже были — пусть сам решит
-          в следующем сообщении если захочет объединить.
-        - `force=true` отключает проверку на точный дубликат (создаст даже при совпадении
-          title). Используй только если пользователь явно подтвердил в текущем сообщении.
+          «создал», «добавил» — ничего не создавалось.
+        - Похожие, но не идентичные — создаётся новая задача, в content упомянуты
+          похожие. Передай пользователю что создал, и что похожие уже были.
+        - `force=true` отключает проверку на точный дубликат.
         DESC;
     }
 
@@ -55,25 +60,63 @@ class CreateTaskTool implements AssistantTool
         return [
             'type' => 'object',
             'properties' => [
+                'tasks' => [
+                    'type' => 'array',
+                    'description' => 'Список задач для создания. Если одна — создастся сразу. Если 2+ — пользователь подтверждает.',
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'raw_text' => ['type' => 'string', 'description' => 'Текст одной задачи'],
+                        ],
+                        'required' => ['raw_text'],
+                    ],
+                ],
                 'raw_text' => [
                     'type' => 'string',
-                    'description' => 'Исходный текст пользователя с описанием задачи (полностью, без изменений)',
+                    'description' => 'Альтернатива tasks для одиночной задачи (backward compat).',
                 ],
                 'force' => [
                     'type' => 'boolean',
-                    'description' => 'Создать даже если есть похожая активная задача. По умолчанию false.',
+                    'description' => 'Создать одиночную задачу даже если есть exact-дубликат. По умолчанию false.',
                 ],
             ],
-            'required' => ['raw_text'],
         ];
     }
 
     public function execute(User $user, array $input): ToolResult
     {
-        $rawText = trim((string) ($input['raw_text'] ?? ''));
-        if ($rawText === '') {
-            return ToolResult::error('raw_text обязателен');
+        // Унифицируем оба формата ввода: tasks[] и одиночный raw_text.
+        $rawTexts = [];
+        if (isset($input['tasks']) && is_array($input['tasks'])) {
+            foreach ($input['tasks'] as $item) {
+                if (is_array($item) && isset($item['raw_text'])) {
+                    $t = trim((string) $item['raw_text']);
+                    if ($t !== '') {
+                        $rawTexts[] = $t;
+                    }
+                } elseif (is_string($item) && trim($item) !== '') {
+                    // На случай если модель передала просто строки.
+                    $rawTexts[] = trim($item);
+                }
+            }
         }
+        if ($rawTexts === [] && isset($input['raw_text']) && is_string($input['raw_text'])) {
+            $t = trim((string) $input['raw_text']);
+            if ($t !== '') {
+                $rawTexts[] = $t;
+            }
+        }
+
+        if ($rawTexts === []) {
+            return ToolResult::error('Нужен tasks (массив) или raw_text (строка)');
+        }
+
+        // 2+ задач → confirmation.
+        if (count($rawTexts) >= 2) {
+            return $this->createPendingBatch($user, $rawTexts);
+        }
+
+        $rawText = $rawTexts[0];
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $dto = $this->taskParser->parse($rawText, $user, $now);
@@ -182,6 +225,61 @@ class CreateTaskTool implements AssistantTool
      *
      * @return array{0: Task|null, 1: Task[]} [exact, similar]
      */
+    /**
+     * @param string[] $rawTexts
+     */
+    private function createPendingBatch(User $user, array $rawTexts): ToolResult
+    {
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $userTz = new \DateTimeZone($user->getTimezone());
+        // Парсим каждую через TaskParser, чтобы получить понятные title для preview.
+        $previews = [];
+        foreach ($rawTexts as $rawText) {
+            try {
+                $dto = $this->taskParser->parse($rawText, $user, $now);
+                $line = $dto->title;
+                if ($dto->deadline !== null) {
+                    $line .= ' (' . $dto->deadline->setTimezone($userTz)->format('Y-m-d H:i') . ')';
+                } else {
+                    $line .= ' (без дедлайна)';
+                }
+                $previews[] = $line;
+            } catch (\Throwable $e) {
+                $this->logger->warning('CreateTaskTool: parser failed for batch item', [
+                    'raw_text' => mb_substr($rawText, 0, 100),
+                    'error' => $e->getMessage(),
+                ]);
+                $previews[] = mb_substr($rawText, 0, 60);
+            }
+        }
+
+        $description = "Будут созданы:\n" . implode("\n", array_map(
+            fn (int $i, string $line) => ($i + 1) . '. ' . $line,
+            array_keys($previews),
+            $previews,
+        ));
+
+        $action = new PendingAction(
+            userId: $user->getId()->toRfc4122(),
+            actionType: 'create_tasks_batch',
+            description: $description,
+            payload: ['raw_texts' => array_values($rawTexts)],
+            createdAt: $now,
+        );
+        $confirmId = $this->pendingStore->create($user, $action);
+
+        $this->logger->info('CreateTaskTool: pending batch', [
+            'user_id' => $user->getId()->toRfc4122(),
+            'count' => count($rawTexts),
+            'confirmation_id' => $confirmId,
+        ]);
+
+        return ToolResult::ok(
+            "PENDING_CONFIRMATION:create_tasks_batch:{$confirmId}\n{$description}",
+            ['confirmation_id' => $confirmId, 'pending' => true],
+        );
+    }
+
     private function findDuplicatesSplit(User $user, string $title): array
     {
         $titleLc = mb_strtolower(trim($title));

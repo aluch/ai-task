@@ -72,6 +72,10 @@ services:
         arguments:
             $redisUrl: '%redis.url%'
 
+    App\AI\PendingActionStore:
+        arguments:
+            $redisUrl: '%redis.url%'
+
     App\Service\FreeSuggestionStore:
         arguments:
             $redisUrl: '%redis.url%'
