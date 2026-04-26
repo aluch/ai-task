@@ -1,0 +1,116 @@
+x-php-service: &php-service
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile.prod
+  working_dir: /var/www/app
+  env_file:
+    - .env
+  environment:
+    APP_ENV: prod
+    APP_DEBUG: 0
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ANTHROPIC_MODEL_PARSER: ${ANTHROPIC_MODEL_PARSER}
+    ANTHROPIC_MODEL_ADVISOR: ${ANTHROPIC_MODEL_ADVISOR}
+    ANTHROPIC_MODEL_ASSISTANT: ${ANTHROPIC_MODEL_ASSISTANT}
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+    TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS}
+    TELEGRAM_MODE: ${TELEGRAM_MODE:-webhook}
+    TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+    DATABASE_URL: ${DATABASE_URL}
+    REDIS_URL: ${REDIS_URL}
+    APP_SECRET: ${APP_SECRET}
+    DOMAIN: ${DOMAIN}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  networks:
+    - ai-task
+
+services:
+  php:
+    <<: *php-service
+    container_name: ai-task-php-prod
+    restart: always
+    # opcache + warmed cache в образе — пересобирать не надо.
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ai-task-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # Caddy serve-ит статику из public/. Код приложения он видеть не должен,
+      # но public/ нужен для file_server и потенциальных ассетов.
+      - php_app_public:/var/www/app/public:ro
+    depends_on:
+      - php
+    networks:
+      - ai-task
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION}-alpine
+    container_name: ai-task-postgres-prod
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ai-task
+    # На prod порт наружу не торчит — доступ только из контейнерной сети.
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-task-redis-prod
+    restart: always
+    volumes:
+      - redis_data_prod:/data
+    networks:
+      - ai-task
+
+  scheduler:
+    <<: *php-service
+    container_name: ai-task-scheduler-prod
+    # Prod-окружение, без cache:clear на старте — кэш уже warmed в образе.
+    command: php bin/console messenger:consume scheduler_reminders --time-limit=3600
+    restart: always
+
+# Bot polling-сервис в prod НЕ запускается — webhook режим (TELEGRAM_MODE=webhook).
+# BotRunCommand при TELEGRAM_MODE=webhook сразу выходит с code 0, поэтому даже
+# если контейнер случайно запустят — он не заюзает API через polling.
+
+volumes:
+  postgres_data_prod:
+  redis_data_prod:
+  caddy_data:
+  caddy_config:
+  # Образ php содержит app/public/. Чтобы Caddy видел те же файлы, экспортируем
+  # как named volume (Docker копирует содержимое из image при первом создании).
+  php_app_public:
+
+networks:
+  ai-task:
+    driver: bridge

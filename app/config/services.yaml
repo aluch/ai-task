@@ -34,6 +34,7 @@ services:
     App\Command\BotRunCommand:
         arguments:
             $telegramToken: '%telegram.bot_token%'
+            $telegramMode: '%env(default::TELEGRAM_MODE)%'
 
     # Claude API
     App\AI\ClaudeClient:
@@ -91,6 +92,17 @@ services:
     App\Notification\TelegramNotifier:
         arguments:
             $token: '%telegram.bot_token%'
+
+    App\Controller\HealthController:
+        arguments:
+            $redisUrl: '%redis.url%'
+        tags: ['controller.service_arguments']
+
+    App\Controller\TelegramWebhookController:
+        arguments:
+            $botToken: '%telegram.bot_token%'
+            $webhookSecret: '%env(TELEGRAM_WEBHOOK_SECRET)%'
+        tags: ['controller.service_arguments']
 
     # Прод-реализация TelegramNotifierInterface — HTTP-клиент к Bot API.
     # Smoke-команды в runtime переключают его в in-memory режим через

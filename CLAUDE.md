@@ -347,7 +347,24 @@ quiet hours / recently_active, reminder-репо методах — обязат
   (tg_id=999999999), подмена notifier'а и clock'а, reset БД. НЕ используй
   его в прод-коде.
 
+## Production-окружение
+
+Dev и prod — два разных compose-стека. Подробно — `docs/deployment.md`. Кратко:
+
+- **dev** (`docker-compose.yml`) — long-polling через `bot`-сервис, nginx на :8080, `APP_ENV=dev`, изолированные cache volumes. Используется для локальной разработки и smoke.
+- **prod** (`docker-compose.prod.yml`) — webhook через Caddy (TLS, Let's Encrypt) → php-fpm с warmed prod-cache + opcache JIT. `bot`-сервис не запускается. Сценарий деплоя — `bin/deploy.sh`.
+
+Переключение режимов через `TELEGRAM_MODE` в `.env`:
+- `polling` — `BotRunCommand` запускает long-polling (dev по умолчанию)
+- `webhook` — `BotRunCommand` тихо выходит (exit 0); updates приходят в `App\Controller\TelegramWebhookController` (POST `/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>`)
+
+Health: `App\Controller\HealthController` (`GET /health`) — проверяет БД (SELECT 1) и Redis (PING). Используется Caddy healthcheck и внешним uptime monitor'ом. <100мс, без AI-вызовов.
+
+Скрипты: `bin/deploy.sh` (полный деплой), `bin/set-webhook.sh` / `bin/delete-webhook.sh` (управление webhook у Telegram). Локальный тест webhook через ngrok — см. `docs/deployment.md`.
+
 ## Следующие шаги
 
-1. Добавить worker-контейнер `messenger:consume` на том же php-образе.
-2. Перейти на webhook (когда будет публичный URL/tunneling).
+1. CI/CD через GitHub Actions (build + deploy на push в main).
+2. Бэкапы Postgres.
+3. Метрики и алёрты (Prometheus/Grafana или Uptime Robot для базового мониторинга).
+4. Лендинг.

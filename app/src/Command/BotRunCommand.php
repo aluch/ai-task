@@ -20,6 +20,7 @@ class BotRunCommand extends Command
     public function __construct(
         private readonly BotRunner $botRunner,
         private readonly string $telegramToken,
+        private readonly string $telegramMode,
     ) {
         parent::__construct();
     }
@@ -36,6 +37,15 @@ class BotRunCommand extends Command
 
             // Exit 0 — not a crash, just not configured yet.
             // docker-compose restart: on-failure will NOT restart on exit 0.
+            return Command::SUCCESS;
+        }
+
+        // Production: webhook mode. Polling-сервис не нужен — Telegram сам
+        // POST-ит updates в TelegramWebhookController. Тихо выходим, чтобы
+        // bot-контейнер не цикл-рестартил, если он остался в compose.
+        if (strtolower($this->telegramMode) === 'webhook') {
+            $io->info('TELEGRAM_MODE=webhook — long polling disabled. Updates приходят через POST /api/telegram/webhook/{secret}.');
+
             return Command::SUCCESS;
         }
 

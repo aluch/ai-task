@@ -1,0 +1,40 @@
+# Caddy конфиг для prod. Caddy сам выпускает Let's Encrypt сертификаты,
+# редиректит HTTP→HTTPS, серверит php-fpm через FastCGI.
+#
+# {$DOMAIN} подставляется из env (см. docker-compose.prod.yml).
+
+{$DOMAIN} {
+	root * /var/www/app/public
+
+	# Сжатие для HTML/JSON/CSS — Telegram webhook это не затрагивает (мелкие
+	# JSON), но health/UI помогает.
+	encode gzip zstd
+
+	# php-fpm в соседнем контейнере (service name: php), порт 9000.
+	php_fastcgi php:9000 {
+		# Скрытие от clients чувствительных путей (стандарт Caddy + добавки).
+		try_files {path} {path}/ /index.php?{query}
+	}
+
+	file_server
+
+	# Health endpoint Telegram-вебхуков и uptime monitor'ов кешировать
+	# не нужно.
+	@health path /health
+	header @health Cache-Control "no-store"
+
+	# Защитные заголовки для prod.
+	header {
+		# Запретить отображение в iframe (clickjacking защита).
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# HSTS включится автоматически у Caddy на HTTPS — уточняем срок.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

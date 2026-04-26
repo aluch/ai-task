@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.6
+# Multi-stage prod build для минимального финального образа.
+# Stage 1 (composer): ставим зависимости без dev-пакетов, генерим
+# autoload с -o (classmap, без runtime-сканирования).
+# Stage 2 (runtime): php-fpm + opcache, копируем код + vendor, без
+# composer/git/autoconf/g++ — финальный образ ~150MB.
+
+# ---- Stage 1: composer ----
+FROM composer:2 AS composer-stage
+
+WORKDIR /app
+COPY app/composer.json app/composer.lock ./
+RUN composer install \
+    --no-dev \
+    --no-interaction \
+    --no-scripts \
+    --no-autoloader \
+    --prefer-dist
+
+COPY app/ ./
+RUN composer dump-autoload --optimize --classmap-authoritative --no-dev
+
+# ---- Stage 2: php-fpm runtime ----
+FROM php:8.3-fpm-alpine AS runtime
+
+# Только runtime-deps. Build-deps (autoconf, g++, make) — в --virtual
+# .build-deps + apk del в конце.
+RUN apk add --no-cache \
+        bash \
+        icu \
+        libzip \
+        postgresql-libs \
+    && apk add --no-cache --virtual .build-deps \
+        $PHPIZE_DEPS \
+        icu-dev \
+        libzip-dev \
+        postgresql-dev \
+        linux-headers \
+        autoconf \
+        g++ \
+        make \
+    && docker-php-ext-configure intl \
+    && docker-php-ext-install -j"$(nproc)" \
+        pdo_pgsql \
+        intl \
+        opcache \
+        zip \
+        bcmath \
+        sockets \
+        pcntl \
+    && pecl install redis \
+    && docker-php-ext-enable redis \
+    && apk del .build-deps \
+    && rm -rf /tmp/* /var/cache/apk/*
+
+COPY docker/php/php-fpm.prod.ini /usr/local/etc/php/php.ini
+COPY docker/php/php-cli.prod.ini /usr/local/etc/php/php-cli.ini
+
+WORKDIR /var/www/app
+
+# Копируем уже-собранный код+vendor из composer-stage. Никаких dev/, tests/.
+COPY --from=composer-stage --chown=1000:1000 /app /var/www/app
+
+# Прокладка для var/cache+var/log — права как у dev-образа,
+# чтобы named volume наследовал uid 1000.
+RUN mkdir -p /var/www/app/var/cache /var/www/app/var/log \
+    && chown -R 1000:1000 /var/www/app/var
+
+# Прогрев opcache preload и Symfony cache при сборке (быстрый первый запрос).
+# APP_ENV=prod APP_DEBUG=0 — иначе не сгенерится prod-кэш.
+ENV APP_ENV=prod APP_DEBUG=0
+RUN php bin/console cache:clear --env=prod --no-warmup \
+    && php bin/console cache:warmup --env=prod \
+    && chown -R 1000:1000 /var/www/app/var
+
+EXPOSE 9000
+
+CMD ["php-fpm"]
