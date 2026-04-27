@@ -66,6 +66,35 @@ COPY --from=composer-stage --chown=1000:1000 /app /var/www/app
 RUN mkdir -p /var/www/app/var/cache /var/www/app/var/log \
     && chown -R 1000:1000 /var/www/app/var
 
+# Symfony Dotenv::bootEnv() требует существование .env. app/.env закоммичен
+# в .gitignore (см. f445829), поэтому в build-context файла нет — без stub'а
+# cache:warmup падает с PathException. Реальные значения переменных приходят
+# из docker-compose environment в рантайме и override'ят stub (ENV-переменные
+# имеют приоритет над .env-файлом).
+#
+# Только APP_ENV=prod недостаточно: cache:warmup прогоняет все warmer'ы
+# (router, validator, ...), они резолвят %env(...)% через EnvVarProcessor —
+# для отсутствующих переменных он бросает EnvNotFoundException. Поэтому
+# в stub'е перечислены все %env()% которые встречаются в config/packages/*
+# и services.yaml. Значения placeholder — реальные придут в рантайме.
+RUN cat > /var/www/app/.env <<'EOF' && chown 1000:1000 /var/www/app/.env
+APP_ENV=prod
+APP_SECRET=stub_will_be_overridden_at_runtime
+APP_DEBUG=0
+DEFAULT_URI=https://localhost
+DATABASE_URL=postgresql://stub:stub@postgres:5432/stub?serverVersion=16&charset=utf8
+REDIS_URL=redis://redis:6379
+MESSENGER_TRANSPORT_DSN=doctrine://default?auto_setup=0
+TELEGRAM_BOT_TOKEN=stub
+TELEGRAM_ALLOWED_USER_IDS=
+TELEGRAM_MODE=webhook
+TELEGRAM_WEBHOOK_SECRET=stub
+ANTHROPIC_API_KEY=stub
+ANTHROPIC_MODEL_PARSER=claude-haiku-4-5
+ANTHROPIC_MODEL_ADVISOR=claude-sonnet-4-6
+ANTHROPIC_MODEL_ASSISTANT=claude-sonnet-4-6
+EOF
+
 # Прогрев opcache preload и Symfony cache при сборке (быстрый первый запрос).
 # APP_ENV=prod APP_DEBUG=0 — иначе не сгенерится prod-кэш.
 ENV APP_ENV=prod APP_DEBUG=0
