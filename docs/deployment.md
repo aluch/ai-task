@@ -88,7 +88,7 @@ REDIS_URL="redis://redis:6379"
 
 ## Локальное тестирование webhook через ngrok
 
-Перед деплоем на VPS — проверить webhook локально через публичный туннель.
+Перед деплоем на VPS — проверить webhook локально через публичный туннель. **Это обязательный шаг:** smoke-тесты гоняют Assistant напрямую через `Assistant::handle()`, а `TelegramWebhookController` (с его `Update::fromArray()` и runtime-резолвом классов Nutgram) ими НЕ покрыт. Все прежние ошибки в нём (неправильный namespace `Update`-класса и т.п.) ловились только живым прогоном через ngrok.
 
 ### 1. Установить ngrok
 
@@ -105,11 +105,17 @@ make up                # обычный dev
 ngrok http 8080        # → даст URL вида https://abc123.ngrok-free.app
 ```
 
-### 3. Сгенерировать webhook secret и добавить в .env
+### 3. Подготовить .env
 
 ```bash
 echo "TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 16)" >> .env
+# Переключить bot-сервис в webhook-режим (BotRunCommand тихо выйдет, не
+# будет конкурировать с webhook'ом за обновления).
+sed -i 's/^TELEGRAM_MODE=.*/TELEGRAM_MODE=webhook/' .env
+make bot-restart
 ```
+
+Если `TELEGRAM_MODE=polling` оставить, Telegram при попытке setWebhook вернёт ошибку — polling и webhook взаимоисключающие.
 
 ### 4. Прописать webhook через скрипт (одноразово через `TELEGRAM_WEBHOOK_URL`)
 
@@ -121,15 +127,21 @@ TELEGRAM_WEBHOOK_URL=https://abc123.ngrok-free.app bin/set-webhook.sh
 
 ### 5. Проверить
 
-- Отправить боту `/help` → должен ответить
-- В логах php-контейнера должна появиться запись об обработке update
-- `curl https://abc123.ngrok-free.app/health` → должен вернуть `{"status":"ok"...}`
+- Отправить боту `/help` → должен ответить.
+- В логах php-контейнера (`docker compose logs -f php`) — записи об обработке update.
+- `curl https://abc123.ngrok-free.app/health` → `{"status":"ok"...}`.
+
+Что искать в логах:
+- `Class "..." not found` — runtime-резолв сломался (как было с `Update`-namespace).
+- `Webhook: invalid JSON` / `Webhook: header secret mismatch` — что-то с конфигом или setWebhook.
+- Тишина при отправке сообщения боту — Telegram не дошёл до ngrok (проверь URL и `getWebhookInfo`).
 
 ### 6. Вернуть polling
 
 ```bash
-bin/delete-webhook.sh   # снимает webhook на стороне Telegram
-make bot-restart        # bot-контейнер заново идёт в polling
+bin/delete-webhook.sh                     # снимает webhook на стороне Telegram
+sed -i 's/^TELEGRAM_MODE=.*/TELEGRAM_MODE=polling/' .env
+make bot-restart                          # bot-контейнер заново идёт в polling
 ```
 
 > ⚠️ **Важно**: пока webhook активен, polling не работает (Telegram не разрешает оба режима одновременно). После теста `delete-webhook.sh` обязателен.

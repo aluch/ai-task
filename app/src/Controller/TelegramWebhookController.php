@@ -9,6 +9,7 @@ use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Configuration;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\RunningMode\Webhook;
+use SergiX44\Nutgram\Telegram\Types\Common\Update;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
@@ -76,9 +77,7 @@ class TelegramWebhookController
             // Webhook-режим (без long polling). Update передаём вручную.
             $bot->setRunningMode(Webhook::class);
             $this->registry->register($bot);
-            $bot->processUpdate(
-                \SergiX44\Nutgram\Telegram\Types\Update\Update::fromArray($data),
-            );
+            $bot->processUpdate(Update::fromArray($data));
         } catch (\Throwable $e) {
             $this->logger->error('Webhook handler failed', [
                 'error' => $e->getMessage(),
