@@ -19,8 +19,13 @@ final class Version20260422073819 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        // this up() migration is auto-generated, please modify it to your needs
-        $this->addSql('DROP TABLE messenger_messages');
+        // DROP messenger_messages — артефакт make:migration: Doctrine не видит
+        // эту таблицу в коде (она managed Symfony Messenger), решает что её
+        // надо удалить. На локалке таблица существовала (auto_setup в dev),
+        // в проде на чистой БД её нет — без IF EXISTS падает с
+        // «table "messenger_messages" does not exist». Следующая миграция
+        // (Version20260427200000) её явно создаёт.
+        $this->addSql('DROP TABLE IF EXISTS messenger_messages');
         $this->addSql('ALTER TABLE tasks ADD respect_quiet_hours BOOLEAN DEFAULT true NOT NULL');
         $this->addSql('ALTER TABLE tasks ADD single_reminder_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL');
         $this->addSql('ALTER TABLE tasks ADD single_reminder_sent_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL');
