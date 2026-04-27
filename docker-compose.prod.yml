@@ -49,9 +49,15 @@ services:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-      # Caddy serve-ит статику из public/. Код приложения он видеть не должен,
-      # но public/ нужен для file_server и потенциальных ассетов.
-      - php_app_public:/var/www/app/public:ro
+      # Bind mount public/ из репозитория. Раньше тут был named volume
+      # php_app_public с идеей «Docker инициализирует из php-image» — но
+      # named volume берёт содержимое из ПЕРВОГО контейнера, который его
+      # маунтит. Caddy в depends_on шёл после php, но startup race — и
+      # бывало volume получал пустоту от Caddy, после чего повторная
+      # инициализация уже не делалась. Bind mount с хоста — детерминирован
+      # и точно совпадает с тем что в php-контейнере (он копирует public/
+      # из ./app/public при build composer-stage).
+      - ./app/public:/var/www/app/public:ro
     depends_on:
       - php
     networks:
@@ -107,9 +113,6 @@ volumes:
   redis_data_prod:
   caddy_data:
   caddy_config:
-  # Образ php содержит app/public/. Чтобы Caddy видел те же файлы, экспортируем
-  # как named volume (Docker копирует содержимое из image при первом создании).
-  php_app_public:
 
 networks:
   ai-task:

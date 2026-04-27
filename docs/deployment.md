@@ -37,6 +37,8 @@ Telegram ──→│   ↓                                                 │
 
 **Чего нет в prod:** `bot` polling-сервис (его роль играет Caddy + php-webhook), `nginx`, `adminer`. `BotRunCommand` при `TELEGRAM_MODE=webhook` тихо выходит — даже если по ошибке запустить bot-контейнер, polling не активируется.
 
+**Public-папка в Caddy.** `app/public/` маунтится в `caddy` контейнер bind-mount'ом с хоста (`./app/public:/var/www/app/public:ro`). Не named volume — раньше пробовали `php_app_public:` с идеей «Docker инициализирует из php-image», но named volume берёт содержимое из ПЕРВОГО маунтящего контейнера, а startup race с `depends_on` приводил к тому что Caddy получал пустоту. Bind с хоста детерминирован: Caddy видит ровно то же `index.php` что и php-fpm в `COPY --from=composer-stage /app /var/www/app`. `:ro` не даёт Caddy писать в репозиторий.
+
 ## Различия dev vs prod
 
 | | dev | prod |
