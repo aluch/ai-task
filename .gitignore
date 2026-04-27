@@ -1,6 +1,10 @@
 /.env
 /.env.local
 /.env.*.local
+# app/.env генерируется Symfony Flex (шаблон с дефолтами). Реальные значения
+# приходят в php-контейнер через docker-compose environment из корневого .env.
+/app/.env
+/app/.env.local
 /app/vendor/
 /app/var/
 .idea/
