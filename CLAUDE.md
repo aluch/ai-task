@@ -362,9 +362,13 @@ Health: `App\Controller\HealthController` (`GET /health`) — проверяет
 
 Скрипты: `bin/deploy.sh` (полный деплой), `bin/set-webhook.sh` / `bin/delete-webhook.sh` (управление webhook у Telegram). Локальный тест webhook через ngrok — см. `docs/deployment.md`.
 
+## CI/CD
+
+GitHub Actions workflow `.github/workflows/deploy.yml` — push в `main` (и `workflow_dispatch` для ручных перевыкаток) запускает `bin/deploy.sh` на VPS через SSH. После деплоя — 60-секундный poll `https://${DOMAIN}/health` (12 попыток × 5s), если не отвечает 200 — `exit 1`, CI помечает failure. Уведомление в Telegram через отдельного бота (`TG_NOTIFY_BOT_TOKEN`). `concurrency: deploy-prod` + `cancel-in-progress` гарантирует один деплой за раз. Подробно — `docs/ci-cd.md` (включая список GitHub Secrets и troubleshooting).
+
 ## Следующие шаги
 
-1. CI/CD через GitHub Actions (build + deploy на push в main).
-2. Бэкапы Postgres.
-3. Метрики и алёрты (Prometheus/Grafana или Uptime Robot для базового мониторинга).
-4. Лендинг.
+1. Бэкапы Postgres.
+2. Метрики и алёрты (Prometheus/Grafana или Uptime Robot для базового мониторинга).
+3. Лендинг.
+4. (опционально) smoke-тесты на CI до деплоя — потребует тестовый Anthropic API key.

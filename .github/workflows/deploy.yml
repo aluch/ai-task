@@ -1,0 +1,86 @@
+name: Deploy to Production
+
+# Триггеры:
+#   push в main      → автодеплой после каждого мерджа
+#   workflow_dispatch → ручной запуск из Actions UI (для откатов / повторных
+#                       прогонов без коммитов)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Защита от параллельных прогонов: если пушнули второй коммит, пока ещё идёт
+# деплой первого — старый прогон отменяется, новый берёт его место. Иначе
+# возможна race на сервере (два git pull одновременно, пересекающиеся
+# docker compose up). Cancel-in-progress=true минимизирует время «висящего»
+# инстанса.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run deploy.sh on VPS
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          # bash -lc — подтягивает .bashrc/.profile (PATH, docker группа).
+          # Без -l на ubuntu-сервере docker может быть недоступен в non-login shell.
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" \
+              'bash -lc "cd ~/ai-task && bash bin/deploy.sh"'
+
+      - name: Notify Telegram on success
+        if: success()
+        env:
+          BOT_TOKEN: ${{ secrets.TG_NOTIFY_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TG_NOTIFY_CHAT_ID }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          SHORT_SHA="${SHA:0:8}"
+          MSG=$(printf "✅ Deploy успешен\n\nкоммит: %s\nавтор: %s\nлог: %s/%s/actions/runs/%s" \
+            "$SHORT_SHA" "$ACTOR" "$SERVER_URL" "$REPO" "$RUN_ID")
+          curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
+
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TG_NOTIFY_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TG_NOTIFY_CHAT_ID }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          SHORT_SHA="${SHA:0:8}"
+          MSG=$(printf "❌ Deploy упал\n\nкоммит: %s\nавтор: %s\nлог: %s/%s/actions/runs/%s" \
+            "$SHORT_SHA" "$ACTOR" "$SERVER_URL" "$REPO" "$RUN_ID")
+          curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MSG}" || true
