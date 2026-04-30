@@ -47,6 +47,20 @@ docker compose -f docker-compose.prod.yml run --rm -T php \
 echo "==> up -d"
 docker compose -f docker-compose.prod.yml up -d
 
+# Валидация: реально ли критичные переменные дошли до php-контейнера.
+# Раньше был баг — переменная задана в .env, но не пробрасывалась через
+# environment в compose, и она тихо была пустой в контейнере (см.
+# инцидент с ADMIN_TELEGRAM_ID, fix(prod): pass ADMIN_TELEGRAM_ID...).
+echo "==> validating env in container"
+for var in TELEGRAM_BOT_TOKEN ANTHROPIC_API_KEY ADMIN_TELEGRAM_ID DATABASE_URL DOMAIN; do
+    val=$(docker compose -f docker-compose.prod.yml exec -T php sh -c "printf '%s' \"\${$var}\"" 2>/dev/null || true)
+    if [ -z "$val" ]; then
+        echo "❌ $var is empty in php container — проверь .env и docker-compose.prod.yml" >&2
+        exit 1
+    fi
+    echo "  ✅ $var is set"
+done
+
 echo "==> set webhook"
 "$(dirname "$0")/set-webhook.sh"
 
