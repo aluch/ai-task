@@ -77,6 +77,25 @@ class TelegramWebhookController
             // Webhook-режим (без long polling). Update передаём вручную.
             $bot->setRunningMode(Webhook::class);
             $this->registry->register($bot);
+
+            // КРИТИЧНО: Nutgram::processUpdate() сам по себе НЕ применяет
+            // global middleware к handler'ам. middleware биндятся в
+            // Nutgram::preflight() (protected) → applyGlobalMiddleware().
+            // В polling preflight() вызывается через run(); мы же зовём
+            // processUpdate() напрямую (тело уже разобрано Symfony Request),
+            // обходя run() → preflight().
+            //
+            // Без этого Closure::bind webhook-режим тихо пускал
+            // не-allowed пользователей в бота: WhitelistMiddleware был
+            // зарегистрирован, но не привязан к handler'ам.
+            //
+            // preflight() идемпотентен (имеет внутренний guard $finalized).
+            (\Closure::bind(
+                fn () => $this->preflight(),
+                $bot,
+                Nutgram::class,
+            ))();
+
             $bot->processUpdate(Update::fromArray($data));
         } catch (\Throwable $e) {
             $this->logger->error('Webhook handler failed', [

@@ -37,13 +37,22 @@ class WhitelistMiddleware
     public function __invoke(Nutgram $bot, $next): void
     {
         // Resolve User (find-or-create по telegram_id). Для callback_query —
-        // тоже работает, у callback есть from.
+        // тоже работает, у callback есть from. Если резолв падает (БД упала,
+        // EM closed) — НЕ пропускаем дальше: лучше пользователь увидит
+        // «техническая ошибка» чем мы случайно дадим доступ незваному из-за
+        // того что не смогли его проверить (fail-closed).
         try {
             $user = $this->userResolver->resolve($bot);
         } catch (\Throwable $e) {
-            $this->logger->error('WhitelistMiddleware: user resolve failed', [
+            $this->logger->error('WhitelistMiddleware: user resolve failed (fail-closed)', [
+                'telegram_id' => $bot->userId(),
                 'error' => $e->getMessage(),
+                'class' => $e::class,
             ]);
+            try {
+                $bot->sendMessage(text: '⚠️ Техническая ошибка, попробуй ещё раз.');
+            } catch (\Throwable) {
+            }
 
             return;
         }
