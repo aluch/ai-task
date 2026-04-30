@@ -209,7 +209,10 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `App\Telegram\BotRunner` — создаёт Nutgram в runtime, регистрирует handlers, запускает polling. Nutgram создаётся вручную (не через DI) — его конструктор бросает исключение при пустом токене.
 - `App\Telegram\HandlerRegistry` — регистрирует middleware и handlers на Nutgram.
 - `App\Telegram\Handler\` — handler-классы (invokable, один класс = одна команда).
-- `App\Telegram\Middleware\WhitelistMiddleware` — фильтр по `TELEGRAM_ALLOWED_USER_IDS`.
+- `App\Telegram\Middleware\WhitelistMiddleware` — gate доступа. Проверяет `users.is_allowed` через `App\Service\AccessGate`. Незваным показывает «🔒 доступ ограничен» с кнопкой «🙏 Запросить доступ». При нажатии — уведомление админу (`ADMIN_TELEGRAM_ID`) с inline-кнопками approve/reject. Подробно — `docs/architecture/whitelist.md`. Раньше whitelist был в env (`TELEGRAM_ALLOWED_USER_IDS`), теперь в БД — управляется через `/admin invite` без редеплоя. Env-переменная сохранена только для bootstrap-миграции `Version20260428000000`.
+- `App\Service\AccessGate` — единая точка решения «пускать ли». `isAllowed(user)` (admin auto-allow), `isAdmin(user)`, `canRequestAccess(user, now)` с 30-дневным cooldown после reject.
+- `App\Telegram\Handler\AdminHandler` — `/admin requests/users/invite/revoke`. Доступно только при `tg_id = ADMIN_TELEGRAM_ID`, не-админу отвечает как на неизвестную команду (не палит существование).
+- `App\Telegram\Handler\AccessRequestCallbackHandler` — callback `access:request|approve|reject:<uuid>`. Логика approve/reject только для админа.
 - `App\Service\TelegramUserResolver` — find-or-create User по telegram_id.
 - `App\Service\RelativeTimeParser` — парсинг относительных и абсолютных форматов времени. Используется и в CLI (`TaskSnoozeCommand`), и в боте (`SnoozeHandler`).
 - `App\Service\PaginationStore` — Redis-хранилище состояний пагинации (state для inline-меню с листанием + waiting_search для кнопки 🔍 Поиск). TTL сессии 1 час, TTL waiting_search 2 минуты.
@@ -239,6 +242,7 @@ docker compose exec --user 1000:1000 php composer <cmd>
 - `/deps <id>` — показать зависимости задачи
 - `/free <время> [контекст]` — AI подбирает задачи под свободное время и контекст (главная фича). Inline-кнопки: Беру/Другие/Не сейчас. Состояние в Redis.
 - `/reset` — сбросить историю диалога с Ассистентом (окно 10 сообщений / 30 мин можно не ждать).
+- `/admin <subcmd>` — только для пользователя с `tg_id = ADMIN_TELEGRAM_ID`. Subcommands: `requests` (pending-запросы доступа), `users` (allowed + count задач), `invite <tg_id>` / `revoke <tg_id>`.
 - (свободный текст) — Assistant с tool calling + история диалога. Понимает многоходовые диалоги («отложи её на завтра» — найдёт по истории) и Telegram Reply (цитирует исходную реплику бота в промпт).
 
 ### Сервис в docker-compose

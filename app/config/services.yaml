@@ -27,9 +27,13 @@ services:
         resource: '../src/'
 
     # Telegram middleware/handlers
-    App\Telegram\Middleware\WhitelistMiddleware:
+    # WhitelistMiddleware теперь читает users.is_allowed из БД (не env).
+    # TELEGRAM_ALLOWED_USER_IDS остался только для bootstrap-миграции.
+    App\Telegram\Middleware\WhitelistMiddleware: ~
+
+    App\Service\AccessGate:
         arguments:
-            $allowedUserIds: '%telegram.allowed_user_ids%'
+            $adminTelegramId: '%env(string:default::ADMIN_TELEGRAM_ID)%'
 
     App\Command\BotRunCommand:
         arguments:

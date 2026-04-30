@@ -42,6 +42,23 @@ class User
     #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $lastMessageAt = null;
 
+    /**
+     * Доступ к боту разрешён. Whitelist в БД (а не в env) — позволяет
+     * приглашать пользователей через /admin invite или approve без
+     * редеплоя. Default false: новые пользователи приходят как незваные,
+     * через WhitelistMiddleware видят «Запросить доступ».
+     */
+    #[ORM\Column(type: 'boolean', options: ['default' => false])]
+    private bool $isAllowed = false;
+
+    /** Когда пользователь нажал «Запросить доступ». null = ещё не запрашивал. */
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $accessRequestedAt = null;
+
+    /** Когда админ отклонил запрос. Если стоит — повторно запросить нельзя. */
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $requestRejectedAt = null;
+
     /** @var Collection<int, Task> */
     #[ORM\OneToMany(mappedBy: 'user', targetEntity: Task::class, cascade: ['persist'], orphanRemoval: true)]
     private Collection $tasks;
@@ -148,6 +165,46 @@ class User
     public function setLastMessageAt(?\DateTimeImmutable $at): self
     {
         $this->lastMessageAt = $at;
+
+        return $this;
+    }
+
+    public function isAllowed(): bool
+    {
+        return $this->isAllowed;
+    }
+
+    public function setAllowed(bool $allowed): self
+    {
+        $this->isAllowed = $allowed;
+        if ($allowed) {
+            // При approve — стираем след отказа (на случай повторного allow).
+            $this->requestRejectedAt = null;
+        }
+
+        return $this;
+    }
+
+    public function getAccessRequestedAt(): ?\DateTimeImmutable
+    {
+        return $this->accessRequestedAt;
+    }
+
+    public function setAccessRequestedAt(?\DateTimeImmutable $at): self
+    {
+        $this->accessRequestedAt = $at;
+
+        return $this;
+    }
+
+    public function getRequestRejectedAt(): ?\DateTimeImmutable
+    {
+        return $this->requestRejectedAt;
+    }
+
+    public function setRequestRejectedAt(?\DateTimeImmutable $at): self
+    {
+        $this->requestRejectedAt = $at;
 
         return $this;
     }

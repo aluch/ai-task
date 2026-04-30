@@ -12,6 +12,7 @@ use App\AI\DTO\PendingAction;
 use App\AI\PendingActionStore;
 use App\Entity\Task;
 use App\Entity\User;
+use App\Service\AccessGate;
 use App\Enum\TaskPriority;
 use App\Enum\TaskSource;
 use App\Enum\TaskStatus;
@@ -46,6 +47,7 @@ final class ScenarioRunner
         private readonly ConversationHistoryStore $historyStore,
         private readonly PendingActionStore $pendingStore,
         private readonly ConfirmationExecutor $confirmExecutor,
+        private readonly AccessGate $accessGate,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -76,6 +78,10 @@ final class ScenarioRunner
             'assistant-confirm-cancel-no' => fn () => $this->assistantConfirmCancelNo(),
             'assistant-confirm-ttl-expired' => fn () => $this->assistantConfirmTtlExpired(),
             'assistant-no-confirm-for-single' => fn () => $this->assistantNoConfirmForSingle(),
+            'whitelist-blocks-unknown-user' => fn () => $this->whitelistBlocksUnknown(),
+            'whitelist-allows-after-approve' => fn () => $this->whitelistAllowsAfterApprove(),
+            'admin-invite-creates-allowed-user' => fn () => $this->adminInviteCreatesAllowed(),
+            'whitelist-rejected-cooldown' => fn () => $this->whitelistRejectedCooldown(),
         ];
     }
 
@@ -1114,6 +1120,107 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('assistant-no-confirm-for-single', 0);
+    }
+
+    /**
+     * Создаёт юзера для whitelist-сценариев (с уникальным tg_id),
+     * удаляя предыдущего с таким же tg_id если остался от прошлого
+     * прогона. SmokeHarness::reset() чистит только тестового юзера
+     * (999999999), не наших пользователей сценариев.
+     */
+    private function ensureCleanWhitelistUser(string $tgId, string $name): User
+    {
+        $em = $this->doctrine->getManager();
+        $existing = $em->getRepository(User::class)->findOneBy(['telegramId' => $tgId]);
+        if ($existing !== null) {
+            $em->remove($existing);
+            $em->flush();
+        }
+        $u = new User();
+        $u->setTelegramId($tgId);
+        $u->setName($name);
+        $em->persist($u);
+        $em->flush();
+
+        return $u;
+    }
+
+    /**
+     * Незваный пользователь (isAllowed=false, не админ) — gate не пускает.
+     */
+    private function whitelistBlocksUnknown(): ScenarioResult
+    {
+        $stranger = $this->ensureCleanWhitelistUser('1234567890', 'Stranger');
+
+        if ($this->accessGate->isAllowed($stranger)) {
+            return ScenarioResult::fail('whitelist-blocks-unknown-user', 0, 'AccessGate пустил незваного');
+        }
+
+        return ScenarioResult::pass('whitelist-blocks-unknown-user', 0);
+    }
+
+    /**
+     * После setAllowed(true) — gate пускает (имитация approve админом).
+     */
+    private function whitelistAllowsAfterApprove(): ScenarioResult
+    {
+        $u = $this->ensureCleanWhitelistUser('1234567891', 'Pending');
+        $em = $this->doctrine->getManager();
+
+        if ($this->accessGate->isAllowed($u)) {
+            return ScenarioResult::fail('whitelist-allows-after-approve', 0, 'gate пустил до approve');
+        }
+
+        $u->setAllowed(true);
+        $em->flush();
+
+        if (!$this->accessGate->isAllowed($u)) {
+            return ScenarioResult::fail('whitelist-allows-after-approve', 0, 'gate не пропустил после approve');
+        }
+
+        return ScenarioResult::pass('whitelist-allows-after-approve', 0);
+    }
+
+    /**
+     * Имитация /admin invite — создаём User с isAllowed=true,
+     * проверяем что AccessGate пускает.
+     */
+    private function adminInviteCreatesAllowed(): ScenarioResult
+    {
+        $invited = $this->ensureCleanWhitelistUser('1234567892', 'Invited');
+        $invited->setAllowed(true);
+        $this->doctrine->getManager()->flush();
+
+        if (!$this->accessGate->isAllowed($invited)) {
+            return ScenarioResult::fail('admin-invite-creates-allowed-user', 0, 'gate не пустил приглашённого');
+        }
+
+        return ScenarioResult::pass('admin-invite-creates-allowed-user', 0);
+    }
+
+    /**
+     * Cooldown после rejection: <30 дней назад rejected → canRequestAccess=false.
+     * 31 день — снова можно.
+     */
+    private function whitelistRejectedCooldown(): ScenarioResult
+    {
+        $u = $this->ensureCleanWhitelistUser('1234567893', 'Rejected');
+
+        $now = new \DateTimeImmutable('2026-04-28 12:00:00 UTC');
+
+        // Только что отклонён → нельзя.
+        $u->setRequestRejectedAt($now->modify('-1 day'));
+        if ($this->accessGate->canRequestAccess($u, $now)) {
+            return ScenarioResult::fail('whitelist-rejected-cooldown', 0, '1 day after reject — should be blocked');
+        }
+
+        // 31 день назад → можно.
+        $u->setRequestRejectedAt($now->modify('-31 days'));
+        if (!$this->accessGate->canRequestAccess($u, $now)) {
+            return ScenarioResult::fail('whitelist-rejected-cooldown', 0, '31 days after reject — should be allowed again');
+        }
+
+        return ScenarioResult::pass('whitelist-rejected-cooldown', 0);
     }
 
     private function setupFreshAssistant(): User

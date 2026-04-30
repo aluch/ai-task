@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Telegram;
 
+use App\Telegram\Handler\AccessRequestCallbackHandler;
+use App\Telegram\Handler\AdminHandler;
 use App\Telegram\Handler\BlockHandler;
 use App\Telegram\Handler\ConfirmationCallbackHandler;
 use App\Telegram\Handler\DependencyCallbackHandler;
@@ -46,6 +48,8 @@ class HandlerRegistry
         private readonly AssistantHandler $assistantHandler,
         private readonly ResetHandler $resetHandler,
         private readonly ConfirmationCallbackHandler $confirmCallbackHandler,
+        private readonly AccessRequestCallbackHandler $accessCallbackHandler,
+        private readonly AdminHandler $adminHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
         private readonly TelegramUserResolver $userResolver,
@@ -98,6 +102,11 @@ class HandlerRegistry
         // пользователь может /reset набрать в одну команду).
         $bot->onCommand('reset', $this->resetHandler);
 
+        // Admin-команды (доступны только пользователю с tg_id = ADMIN_TELEGRAM_ID,
+        // остальным AdminHandler ответит как на неизвестную команду).
+        $bot->onCommand('admin', $this->adminHandler);
+        $bot->onCommand('admin {args}', $this->adminHandler);
+
         // Callback queries
         $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
         $bot->onCallbackQueryData('done:{data}', $this->taskActionCallbackHandler);
@@ -107,6 +116,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('list:{data}', $this->listCallbackHandler);
         $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
         $bot->onCallbackQueryData('confirm:{data}', $this->confirmCallbackHandler);
+        $bot->onCallbackQueryData('access:{data}', $this->accessCallbackHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;
