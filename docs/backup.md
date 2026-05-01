@@ -23,10 +23,20 @@ YC_BUCKET=pomni-backups
 
 Endpoint и регион зашиты в `bin/backup.sh` (это константы Yandex Cloud — `https://storage.yandexcloud.net`, `ru-central1`).
 
-### 3. awscli и cron
+### 3. AWS CLI и cron
+
+В Ubuntu 24.04 пакет `awscli` удалён из репозиториев — `apt install awscli`
+вернёт `Package 'awscli' has no installation candidate`. Ставим AWS CLI v2
+от Amazon (официальный installer):
 
 ```bash
-sudo apt install -y awscli
+sudo apt install -y unzip
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip
+sudo ./aws/install
+rm -rf awscliv2.zip aws/
+aws --version             # должен показать aws-cli/2.x
+
 bash bin/backup.sh         # тестовый запуск, должен залить в bucket
 bash bin/install-cron.sh   # ежедневно 04:00 UTC
 crontab -l                 # проверить что строка добавилась
