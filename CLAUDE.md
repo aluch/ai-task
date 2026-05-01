@@ -370,9 +370,15 @@ Health: `App\Controller\HealthController` (`GET /health`) — проверяет
 
 GitHub Actions workflow `.github/workflows/deploy.yml` — push в `main` (и `workflow_dispatch` для ручных перевыкаток) запускает `bin/deploy.sh` на VPS через SSH. После деплоя — 60-секундный poll `https://${DOMAIN}/health` (12 попыток × 5s), если не отвечает 200 — `exit 1`, CI помечает failure. Уведомление в Telegram через отдельного бота (`TG_NOTIFY_BOT_TOKEN`). `concurrency: deploy-prod` + `cancel-in-progress` гарантирует один деплой за раз. Подробно — `docs/ci-cd.md` (включая список GitHub Secrets и troubleshooting).
 
+## Backups & Monitoring
+
+- **Бэкапы Postgres**: `bin/backup.sh` (cron 04:00 UTC) → Yandex Object Storage, retention 30 дней. Telegram-алерт при ошибке + раз в неделю об успехе. Подробно — `docs/backup.md`.
+- **`/health` endpoint**: проверяет БД (SELECT 1), Redis (PING), scheduler heartbeat (`scheduler_heartbeat.last_tick_at` свежее 3 минут). 200/503. `App\Service\HeartbeatTracker::recordTick($now)` дёргается на каждом из 4 reminder-tick'ов.
+- **Uptime Robot**: внешний пинг `/health` каждые 5 минут, telegram-алерт при не-200. Подробно — `docs/monitoring.md`.
+- **Ротация Docker logs**: `x-logging` anchor в `docker-compose.prod.yml` — 3 × 50MB на контейнер, compress=true.
+
 ## Следующие шаги
 
-1. Бэкапы Postgres.
-2. Метрики и алёрты (Prometheus/Grafana или Uptime Robot для базового мониторинга).
-3. Лендинг.
-4. (опционально) smoke-тесты на CI до деплоя — потребует тестовый Anthropic API key.
+1. Лендинг.
+2. (опционально) smoke-тесты на CI до деплоя — потребует тестовый Anthropic API key.
+3. (опционально) бэкап Redis (история диалогов) — пока потеря не критична.

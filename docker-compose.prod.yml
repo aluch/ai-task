@@ -1,3 +1,14 @@
+# Общая конфигурация ротации логов для всех контейнеров. Без неё
+# json-file-driver Docker'а накапливает логи без ограничения и за
+# несколько недель забивает диск (особенно messenger.INFO от scheduler'а
+# каждую минуту). 3 × 50MB сжатых = ~150MB на контейнер — с запасом.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+    compress: "true"
+
 x-php-service: &php-service
   build:
     context: .
@@ -5,6 +16,7 @@ x-php-service: &php-service
   working_dir: /var/www/app
   env_file:
     - .env
+  logging: *default-logging
   environment:
     APP_ENV: prod
     APP_DEBUG: 0
@@ -43,6 +55,7 @@ services:
     image: caddy:2-alpine
     container_name: ai-task-caddy
     restart: always
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
@@ -77,6 +90,7 @@ services:
     image: postgres:${POSTGRES_VERSION}-alpine
     container_name: ai-task-postgres-prod
     restart: always
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -96,6 +110,7 @@ services:
     image: redis:7-alpine
     container_name: ai-task-redis-prod
     restart: always
+    logging: *default-logging
     volumes:
       - redis_data_prod:/data
     networks:
