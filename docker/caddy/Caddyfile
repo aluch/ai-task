@@ -11,10 +11,13 @@
 	encode gzip zstd
 
 	# php-fpm в соседнем контейнере (service name: php), порт 9000.
-	php_fastcgi php:9000 {
-		# Скрытие от clients чувствительных путей (стандарт Caddy + добавки).
-		try_files {path} {path}/ /index.php?{query}
-	}
+	# БЕЗ блока {try_files ...}: Caddy v2 в директиве php_fastcgi уже имеет
+	# встроенную try_files-логику для frontend-controller паттерна (Symfony,
+	# Laravel). Переопределение блоком ломает её — все маршруты в обход
+	# index.php (включая /health и /api/telegram/webhook/*) возвращают 404
+	# от Caddy, не доходя до php-fpm. Стандартный Caddy-recipe для Symfony —
+	# именно `php_fastcgi <addr>` без блока.
+	php_fastcgi php:9000
 
 	file_server
 
