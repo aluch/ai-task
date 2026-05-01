@@ -104,7 +104,12 @@ services:
       retries: 10
     networks:
       - ai-task
-    # На prod порт наружу не торчит — доступ только из контейнерной сети.
+    ports:
+      # Биндим только на 127.0.0.1 хост-машины — наружу через интернет
+      # порт всё ещё закрыт (firewall + явный bind на loopback). Доступ
+      # из локальных GUI (HeidiSQL/DBeaver/psql) — через SSH-туннель:
+      #   ssh -L 5432:127.0.0.1:5432 deploy@${VPS_HOST}
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: redis:7-alpine
