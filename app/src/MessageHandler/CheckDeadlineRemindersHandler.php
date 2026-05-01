@@ -8,6 +8,7 @@ use App\Clock\Clock;
 use App\Entity\Task;
 use App\Message\CheckDeadlineRemindersMessage;
 use App\Notification\ReminderSender;
+use App\Service\HeartbeatTracker;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
@@ -19,12 +20,19 @@ final class CheckDeadlineRemindersHandler
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
         private readonly LoggerInterface $logger,
+        private readonly HeartbeatTracker $heartbeat,
         private Clock $clock,
     ) {
     }
 
     public function __invoke(CheckDeadlineRemindersMessage $message): void
     {
+        // Heartbeat ДО try: если tick упадёт — Messenger ретрайнет, но
+        // запись «scheduler жив» уже есть, /health не покажет stale из-за
+        // одного transient сбоя. Если worker совсем умер — heartbeat не
+        // пишется и /health через 3 минуты покажет stale (корректно).
+        $this->heartbeat->recordTick($this->clock->now());
+
         try {
             $this->tick();
         } catch (\Throwable $e) {

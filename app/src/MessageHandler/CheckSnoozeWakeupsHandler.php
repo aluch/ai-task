@@ -9,6 +9,7 @@ use App\Entity\Task;
 use App\Message\CheckSnoozeWakeupsMessage;
 use App\Notification\ReminderSender;
 use App\Notification\SendResult;
+use App\Service\HeartbeatTracker;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
@@ -32,12 +33,16 @@ final class CheckSnoozeWakeupsHandler
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
         private readonly LoggerInterface $logger,
+        private readonly HeartbeatTracker $heartbeat,
         private Clock $clock,
     ) {
     }
 
     public function __invoke(CheckSnoozeWakeupsMessage $message): void
     {
+        // Heartbeat — см. CheckDeadlineRemindersHandler.
+        $this->heartbeat->recordTick($this->clock->now());
+
         try {
             $this->tick();
         } catch (\Throwable $e) {

@@ -13,6 +13,7 @@ use App\AI\PendingActionStore;
 use App\Entity\Task;
 use App\Entity\User;
 use App\Service\AccessGate;
+use App\Service\HeartbeatTracker;
 use App\Enum\TaskPriority;
 use App\Enum\TaskSource;
 use App\Enum\TaskStatus;
@@ -48,6 +49,7 @@ final class ScenarioRunner
         private readonly PendingActionStore $pendingStore,
         private readonly ConfirmationExecutor $confirmExecutor,
         private readonly AccessGate $accessGate,
+        private readonly HeartbeatTracker $heartbeat,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -82,6 +84,7 @@ final class ScenarioRunner
             'whitelist-allows-after-approve' => fn () => $this->whitelistAllowsAfterApprove(),
             'admin-invite-creates-allowed-user' => fn () => $this->adminInviteCreatesAllowed(),
             'whitelist-rejected-cooldown' => fn () => $this->whitelistRejectedCooldown(),
+            'scheduler-heartbeat-records-tick' => fn () => $this->schedulerHeartbeatRecordsTick(),
         ];
     }
 
@@ -1221,6 +1224,39 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('whitelist-rejected-cooldown', 0);
+    }
+
+    /**
+     * Heartbeat: после recordTick($now) isStale($now+10мин, threshold=180s)
+     * вернёт true (10 минут > 180 секунд). После повторного recordTick
+     * с тем же $now+10мин — false.
+     */
+    private function schedulerHeartbeatRecordsTick(): ScenarioResult
+    {
+        $base = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->heartbeat->recordTick($base);
+
+        // Спустя 10 минут (без обновлений) — stale.
+        $tenMinutesLater = $base->modify('+10 minutes');
+        if (!$this->heartbeat->isStale($tenMinutesLater, 180)) {
+            return ScenarioResult::fail(
+                'scheduler-heartbeat-records-tick',
+                0,
+                'через 10 мин после tick — НЕ stale (ожидался stale при threshold 180с)',
+            );
+        }
+
+        // Записываем свежий tick — больше не stale.
+        $this->heartbeat->recordTick($tenMinutesLater);
+        if ($this->heartbeat->isStale($tenMinutesLater, 180)) {
+            return ScenarioResult::fail(
+                'scheduler-heartbeat-records-tick',
+                0,
+                'после свежего tick всё ещё stale',
+            );
+        }
+
+        return ScenarioResult::pass('scheduler-heartbeat-records-tick', 0);
     }
 
     private function setupFreshAssistant(): User

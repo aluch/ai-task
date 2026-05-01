@@ -8,6 +8,7 @@ use App\Clock\Clock;
 use App\Entity\Task;
 use App\Message\CheckSingleRemindersMessage;
 use App\Notification\ReminderSender;
+use App\Service\HeartbeatTracker;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
@@ -25,12 +26,16 @@ final class CheckSingleRemindersHandler
         private readonly ManagerRegistry $doctrine,
         private readonly ReminderSender $sender,
         private readonly LoggerInterface $logger,
+        private readonly HeartbeatTracker $heartbeat,
         private Clock $clock,
     ) {
     }
 
     public function __invoke(CheckSingleRemindersMessage $message): void
     {
+        // Heartbeat — см. CheckDeadlineRemindersHandler.
+        $this->heartbeat->recordTick($this->clock->now());
+
         try {
             $this->tick();
         } catch (\Throwable $e) {

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Controller;
 
+use App\Service\HeartbeatTracker;
 use Doctrine\Persistence\ManagerRegistry;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\Routing\Attribute\Route;
@@ -19,6 +20,7 @@ class HealthController
 {
     public function __construct(
         private readonly ManagerRegistry $doctrine,
+        private readonly HeartbeatTracker $heartbeat,
         private readonly string $redisUrl,
     ) {
     }
@@ -26,9 +28,12 @@ class HealthController
     #[Route('/health', name: 'health', methods: ['GET'])]
     public function __invoke(): JsonResponse
     {
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
         $checks = [
             'db' => $this->checkDb(),
             'redis' => $this->checkRedis(),
+            'scheduler' => $this->heartbeat->isStale($now) ? 'stale' : 'ok',
         ];
 
         $allOk = !in_array(false, array_map(fn ($r) => $r === 'ok', $checks), true);
