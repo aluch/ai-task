@@ -217,10 +217,19 @@ Endpoint `/health` возвращает:
 - Caddy healthcheck (см. `docker-compose.prod.yml`)
 - Внешний uptime monitor (Uptime Robot, Better Uptime и т.п.)
 
+## Лендинг (pomni.io)
+
+На том же VPS Caddy обслуживает второй домен — статический лендинг `pomni.io` (+ `www.pomni.io` → редирект на canonical).
+
+- **Файлы**: `/home/deploy/pomni-landing/` на VPS, отдельный репо `git@github.com:aluch/pomni-landing.git`. Свой CI/CD у того репо (GitHub Actions → SSH → `git pull` в эту папку).
+- **Caddy mount**: bind mount `/home/deploy/pomni-landing:/var/www/landing:ro` в секции `caddy.volumes` (`docker-compose.prod.yml`). Caddy раздаёт файлы прямо с диска — обновление лендинга подхватывается **без рестарта** Caddy.
+- **TLS**: при первом обращении к `pomni.io` Caddy сам выпускает Let's Encrypt сертификат. DNS уже настроен (`pomni.io` и `www.pomni.io` → 79.137.199.38).
+- **Кэш**: HTML отдаётся с `Cache-Control: public, max-age=3600` (1 час), картинки/шрифты — `max-age=86400, immutable` (1 сутки).
+- **Бот не затрагивается**: блок для `{$DOMAIN}` (tasks.luchnikov.ru) в `Caddyfile` не меняется. Два домена живут параллельно в одном Caddy-процессе.
+
+При первом деплое pomni.io: убедиться что `/home/deploy/pomni-landing/` существует и содержит `index.html` до `docker compose up -d caddy` — иначе Caddy при старте не сможет смаунтить (Docker создаст пустую директорию, но Caddy будет отдавать 404).
+
 ## Что НЕ настроено сейчас (TODO для следующих этапов)
 
-- CI/CD через GitHub Actions
-- Бэкапы Postgres
 - Метрики (Prometheus/Grafana)
-- Алёрты при ошибках
-- Лендинг
+- Алёрты при логических ошибках (Anthropic key expired, Telegram заблокировал бота)

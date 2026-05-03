@@ -75,6 +75,12 @@ services:
       # и точно совпадает с тем что в php-контейнере (он копирует public/
       # из ./app/public при build composer-stage).
       - ./app/public:/var/www/app/public:ro
+      # Лендинг pomni.io — статика из отдельного репо pomni-landing,
+      # клонированного на VPS в /home/deploy/pomni-landing. У лендинга
+      # свой CI/CD (git pull), Caddy раздаёт файлы прямо с диска без
+      # рестарта. Путь абсолютный: docker-compose.prod.yml на локальной
+      # машине не запускается, поэтому prod-only путь безопасен.
+      - /home/deploy/pomni-landing:/var/www/landing:ro
     depends_on:
       - php
     networks:

@@ -41,3 +41,34 @@
 		format console
 	}
 }
+
+# Лендинг pomni.io — статика из /var/www/landing (bind mount от
+# /home/deploy/pomni-landing). У лендинга свой репозиторий и свой CI/CD;
+# обновление файлов на диске Caddy подхватывает на лету, без рестарта.
+pomni.io {
+	root * /var/www/landing
+	encode gzip zstd
+	file_server
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Cache-Control "public, max-age=3600"
+	}
+
+	# Картинки/шрифты — кэшировать сутки + immutable (URL обычно с хешем).
+	@assets path *.png *.jpg *.svg *.ico *.woff2
+	header @assets Cache-Control "public, max-age=86400, immutable"
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# www.pomni.io → pomni.io (canonical без www).
+www.pomni.io {
+	redir https://pomni.io{uri} permanent
+}
