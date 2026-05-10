@@ -81,6 +81,14 @@ services:
         arguments:
             $redisUrl: '%redis.url%'
 
+    # PlanCatalog — параметры из %subscription.plans%, autowire не справляется
+    # с array-аргументом. См. config/packages/subscription.yaml.
+    App\Service\PlanCatalog:
+        arguments:
+            $plans: '%subscription.plans%'
+            $trialDays: '%subscription.trial_days%'
+            $refundWindowDays: '%subscription.refund_window_days%'
+
     App\Service\FreeSuggestionStore:
         arguments:
             $redisUrl: '%redis.url%'

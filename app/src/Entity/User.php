@@ -59,6 +59,15 @@ class User
     #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $requestRejectedAt = null;
 
+    /**
+     * Админ-флаг. Пришёл с /admin-команд (см. AccessGate). Раньше админ
+     * определялся сравнением telegram_id с env ADMIN_TELEGRAM_ID — теперь
+     * флаг в БД, env используется только как bootstrap-маркер первого
+     * админа (см. миграцию Version20260507000000).
+     */
+    #[ORM\Column(type: 'boolean', options: ['default' => false])]
+    private bool $isAdmin = false;
+
     /** @var Collection<int, Task> */
     #[ORM\OneToMany(mappedBy: 'user', targetEntity: Task::class, cascade: ['persist'], orphanRemoval: true)]
     private Collection $tasks;
@@ -165,6 +174,18 @@ class User
     public function setLastMessageAt(?\DateTimeImmutable $at): self
     {
         $this->lastMessageAt = $at;
+
+        return $this;
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->isAdmin;
+    }
+
+    public function setAdmin(bool $admin): self
+    {
+        $this->isAdmin = $admin;
 
         return $this;
     }

@@ -370,6 +370,23 @@ Health: `App\Controller\HealthController` (`GET /health`) — проверяет
 
 GitHub Actions workflow `.github/workflows/deploy.yml` — push в `main` (и `workflow_dispatch` для ручных перевыкаток) запускает `bin/deploy.sh` на VPS через SSH. После деплоя — 60-секундный poll `https://${DOMAIN}/health` (12 попыток × 5s), если не отвечает 200 — `exit 1`, CI помечает failure. Уведомление в Telegram через отдельного бота (`TG_NOTIFY_BOT_TOKEN`). `concurrency: deploy-prod` + `cancel-in-progress` гарантирует один деплой за раз. Подробно — `docs/ci-cd.md` (включая список GitHub Secrets и troubleshooting).
 
+## Подписки и биллинг (S1)
+
+Plan-aware архитектура: `App\Domain\Subscription\Plan` (Free/Pro), `SubscriptionStatus` (trialing/active/past_due/cancelled/expired), `PaymentStatus`. Все суммы в копейках (`amountMinor: int`).
+
+Сущности:
+- `App\Entity\Subscription` — план + статус + период (`currentPeriodStart`/`End`), `trialEndsAt` для триала, `externalSubscriptionId` для будущей привязки к ЮKassa.
+- `App\Entity\Payment` — `amountMinor` (копейки), `currency`, `providerData` (JSON), привязка к user + опц. subscription.
+- `App\Entity\UsageCounter` — singleton-per-user (UNIQUE на user_id): отдельные счётчики для Free (скользящий 30-дневный период) и Pro (billing period подписки).
+- `User.isAdmin` — bool в БД, миграция bootstrap'ит из ADMIN_TELEGRAM_ID env. `AccessGate::isAdmin` теперь читает из БД (env используется только как маркер первого админа).
+
+Сервисы:
+- `App\Service\PlanCatalog` — типизированный доступ к limits/prices из `config/packages/subscription.yaml` (через env-переменные `LIMIT_FREE_ACTIONS`, `LIMIT_PRO_ACTIONS`, `PRICE_PRO_MONTHLY_RUB_MINOR`, `TRIAL_DAYS`, `REFUND_WINDOW_DAYS`).
+- `App\Service\Subscription\SubscriptionService` — `startTrial` (идемпотентен, защита от абуза), `activatePro`, `cancel` (доступ до `currentPeriodEnd`), `expire`, `getCurrentPlan`, `getActiveSubscription`, `isRefundEligible`.
+- `App\Service\Subscription\UsageTracker` — `recordAction` (+1 к счётчику с авто-сбросом при истёкшем периоде), `canPerformAction`, `getRemainingActions`, `getNextResetAt`.
+
+Что НЕ сделано в S1 (etapas далее): лимит-чек в AssistantHandler (S2), UI `/upgrade`/`/subscription` (S3), Telegram Payments (S4), auto-rebill (S5), реальный refund (S6). Подробно — `docs/subscriptions.md`.
+
 ## Backups & Monitoring
 
 - **Бэкапы Postgres**: `bin/backup.sh` (cron 04:00 UTC) → Yandex Object Storage, retention 30 дней. Telegram-алерт при ошибке + раз в неделю об успехе. Подробно — `docs/backup.md`.

@@ -28,29 +28,35 @@ class AccessGate
     ) {
     }
 
+    /**
+     * Источник истины — users.is_admin (выставлено миграцией
+     * Version20260507000000 для пользователя из ADMIN_TELEGRAM_ID).
+     * Доп. проверка по env: если флаг ещё не выставлен (новая среда,
+     * пользователь только что зарегистрировался), но telegram_id совпадает
+     * с ADMIN_TELEGRAM_ID — auto-promote на лету.
+     */
     public function isAdmin(User $user): bool
     {
-        if ($this->adminTelegramId === '') {
-            return false;
+        if ($user->isAdmin()) {
+            return true;
+        }
+        if ($this->adminTelegramId !== '' && (string) $user->getTelegramId() === $this->adminTelegramId) {
+            $user->setAdmin(true);
+            $user->setAllowed(true);
+            $this->doctrine->getManager()->flush();
+
+            return true;
         }
 
-        return (string) $user->getTelegramId() === $this->adminTelegramId;
+        return false;
     }
 
     /**
      * Главный gate: пускаем дальше или нет. Админ всегда пропускается.
-     * Для незваных автоматически даём доступ если они админ — без
-     * необходимости явно создавать запись.
      */
     public function isAllowed(User $user): bool
     {
         if ($this->isAdmin($user)) {
-            // Админу — auto-allow на лету, чтобы не зависеть от бутстрап-миграции.
-            if (!$user->isAllowed()) {
-                $user->setAllowed(true);
-                $this->doctrine->getManager()->flush();
-            }
-
             return true;
         }
 

@@ -1,0 +1,15 @@
+parameters:
+    # Limits/prices каждого тарифа. Все суммы в копейках (RUB minor) —
+    # стандарт для финансов, без floating-point. В UI делим на 100.
+    subscription.plans:
+        free:
+            action_limit: '%env(int:LIMIT_FREE_ACTIONS)%'
+            price_rub_minor: 0
+        pro:
+            action_limit: '%env(int:LIMIT_PRO_ACTIONS)%'
+            price_rub_minor: '%env(int:PRICE_PRO_MONTHLY_RUB_MINOR)%'
+    subscription.trial_days: '%env(int:TRIAL_DAYS)%'
+    subscription.refund_window_days: '%env(int:REFUND_WINDOW_DAYS)%'
+
+# DI-регистрация PlanCatalog — в основном services.yaml
+# (autowire не справляется с array-аргументом из параметров).

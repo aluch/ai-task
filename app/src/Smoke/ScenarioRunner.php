@@ -12,8 +12,14 @@ use App\AI\DTO\PendingAction;
 use App\AI\PendingActionStore;
 use App\Entity\Task;
 use App\Entity\User;
+use App\Domain\Subscription\Plan;
+use App\Domain\Subscription\SubscriptionStatus;
+use App\Entity\Subscription;
+use App\Entity\UsageCounter;
 use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
+use App\Service\Subscription\SubscriptionService;
+use App\Service\Subscription\UsageTracker;
 use App\Enum\TaskPriority;
 use App\Enum\TaskSource;
 use App\Enum\TaskStatus;
@@ -50,6 +56,8 @@ final class ScenarioRunner
         private readonly ConfirmationExecutor $confirmExecutor,
         private readonly AccessGate $accessGate,
         private readonly HeartbeatTracker $heartbeat,
+        private readonly SubscriptionService $subscriptions,
+        private readonly UsageTracker $usage,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -85,6 +93,19 @@ final class ScenarioRunner
             'admin-invite-creates-allowed-user' => fn () => $this->adminInviteCreatesAllowed(),
             'whitelist-rejected-cooldown' => fn () => $this->whitelistRejectedCooldown(),
             'scheduler-heartbeat-records-tick' => fn () => $this->schedulerHeartbeatRecordsTick(),
+            // S1: subscriptions + usage tracking
+            'subscription-trial-starts-on-first-start' => fn () => $this->subTrialStartsOnFirst(),
+            'subscription-trial-not-given-twice' => fn () => $this->subTrialNotTwice(),
+            'subscription-pro-activation-from-trial' => fn () => $this->subProActivationFromTrial(),
+            'subscription-cancel-keeps-access-until-period-end' => fn () => $this->subCancelKeepsAccess(),
+            'subscription-expire-drops-to-free' => fn () => $this->subExpireDropsToFree(),
+            'usage-free-counter-increments' => fn () => $this->usageFreeIncrements(),
+            'usage-free-limit-blocks' => fn () => $this->usageFreeLimitBlocks(),
+            'usage-free-counter-resets-after-30-days' => fn () => $this->usageFreeResets(),
+            'usage-pro-counter-resets-on-new-billing-period' => fn () => $this->usageProResets(),
+            'usage-pro-limit-blocks' => fn () => $this->usageProLimitBlocks(),
+            'refund-eligible-within-window' => fn () => $this->refundEligible(),
+            'refund-not-eligible-after-window' => fn () => $this->refundNotEligible(),
         ];
     }
 
@@ -1257,6 +1278,235 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('scheduler-heartbeat-records-tick', 0);
+    }
+
+    /**
+     * Helper для S1-сценариев. Создаёт чистого юзера с уникальным tg_id
+     * и удаляет его подписки/usage если они остались от прошлых запусков.
+     * SmokeHarness::reset() чистит только тестового user'а (999999999).
+     */
+    private function ensureCleanSubUser(string $tgId, string $name): User
+    {
+        $em = $this->doctrine->getManager();
+        $existing = $em->getRepository(User::class)->findOneBy(['telegramId' => $tgId]);
+        if ($existing !== null) {
+            // Каскад на subscriptions/payments/usage_counters снесёт зависимости.
+            $em->remove($existing);
+            $em->flush();
+            $em->clear();
+        }
+        $u = new User();
+        $u->setTelegramId($tgId);
+        $u->setName($name);
+        $em->persist($u);
+        $em->flush();
+
+        return $u;
+    }
+
+    private function subTrialStartsOnFirst(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000001', 'Trial');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->startTrial($u, $now);
+        if ($sub === null) {
+            return ScenarioResult::fail('subscription-trial-starts-on-first-start', 0, 'startTrial вернул null для нового юзера');
+        }
+        if ($sub->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail('subscription-trial-starts-on-first-start', 0, "статус {$sub->getStatus()->value}, ожидался trialing");
+        }
+        if ($sub->getPlan() !== Plan::Pro) {
+            return ScenarioResult::fail('subscription-trial-starts-on-first-start', 0, 'триал должен быть на Pro');
+        }
+        $expectedEnd = $now->modify('+7 days');
+        if ($sub->getTrialEndsAt()?->format('Y-m-d') !== $expectedEnd->format('Y-m-d')) {
+            return ScenarioResult::fail('subscription-trial-starts-on-first-start', 0, 'trialEndsAt != now+7d');
+        }
+
+        return ScenarioResult::pass('subscription-trial-starts-on-first-start', 0);
+    }
+
+    private function subTrialNotTwice(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000002', 'TrialTwice');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $first = $this->subscriptions->startTrial($u, $now);
+        if ($first === null) {
+            return ScenarioResult::fail('subscription-trial-not-given-twice', 0, 'первый триал не дали');
+        }
+        $second = $this->subscriptions->startTrial($u, $now);
+        if ($second !== null) {
+            return ScenarioResult::fail('subscription-trial-not-given-twice', 0, 'повторный триал дали (защита от абуза не работает)');
+        }
+
+        return ScenarioResult::pass('subscription-trial-not-given-twice', 0);
+    }
+
+    private function subProActivationFromTrial(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000003', 'ProFromTrial');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->startTrial($u, $now);
+
+        $payStart = $now->modify('+3 days');
+        $payEnd = $payStart->modify('+30 days');
+        $sub = $this->subscriptions->activatePro($u, $payStart, $payEnd, 'ext-1', $payStart);
+
+        if ($sub->getStatus() !== SubscriptionStatus::Active) {
+            return ScenarioResult::fail('subscription-pro-activation-from-trial', 0, "после activatePro статус {$sub->getStatus()->value}");
+        }
+        if ($sub->getCurrentPeriodEnd()->format('Y-m-d') !== $payEnd->format('Y-m-d')) {
+            return ScenarioResult::fail('subscription-pro-activation-from-trial', 0, 'currentPeriodEnd не обновился');
+        }
+
+        return ScenarioResult::pass('subscription-pro-activation-from-trial', 0);
+    }
+
+    private function subCancelKeepsAccess(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000004', 'Cancel');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        $sub = $this->subscriptions->getActiveSubscription($u);
+        $this->subscriptions->cancel($sub, $now);
+
+        if ($this->subscriptions->getCurrentPlan($u) !== Plan::Pro) {
+            return ScenarioResult::fail('subscription-cancel-keeps-access-until-period-end', 0, 'после cancel юзер уже не Pro');
+        }
+        $sub2 = $this->subscriptions->getActiveSubscription($u);
+        if ($sub2?->getStatus() !== SubscriptionStatus::Cancelled) {
+            return ScenarioResult::fail('subscription-cancel-keeps-access-until-period-end', 0, 'статус не cancelled');
+        }
+
+        return ScenarioResult::pass('subscription-cancel-keeps-access-until-period-end', 0);
+    }
+
+    private function subExpireDropsToFree(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000005', 'Expire');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        $this->subscriptions->expire($sub, $now->modify('+31 days'));
+
+        if ($this->subscriptions->getCurrentPlan($u) !== Plan::Free) {
+            return ScenarioResult::fail('subscription-expire-drops-to-free', 0, 'после expire юзер не упал в Free');
+        }
+
+        return ScenarioResult::pass('subscription-expire-drops-to-free', 0);
+    }
+
+    private function usageFreeIncrements(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000006', 'FreeInc');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        for ($i = 0; $i < 3; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        $em = $this->doctrine->getManager();
+        $c = $em->getRepository(UsageCounter::class)->findOneBy(['user' => $u]);
+        if ($c?->getFreeActionsCount() !== 3) {
+            return ScenarioResult::fail('usage-free-counter-increments', 0, 'счётчик != 3');
+        }
+        if (!$this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('usage-free-counter-increments', 0, 'canPerform false при 3/50');
+        }
+
+        return ScenarioResult::pass('usage-free-counter-increments', 0);
+    }
+
+    private function usageFreeLimitBlocks(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000007', 'FreeLimit');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        for ($i = 0; $i < 50; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        if ($this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('usage-free-limit-blocks', 0, 'после 50 действий canPerform всё ещё true');
+        }
+
+        return ScenarioResult::pass('usage-free-limit-blocks', 0);
+    }
+
+    private function usageFreeResets(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000008', 'FreeReset');
+        $start = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->usage->recordAction($u, $start);
+        $later = $start->modify('+31 days');
+        $this->usage->recordAction($u, $later);
+        $em = $this->doctrine->getManager();
+        $c = $em->getRepository(UsageCounter::class)->findOneBy(['user' => $u]);
+        if ($c?->getFreeActionsCount() !== 1) {
+            return ScenarioResult::fail('usage-free-counter-resets-after-30-days', 0, "после reset count = {$c?->getFreeActionsCount()}, ожидался 1");
+        }
+
+        return ScenarioResult::pass('usage-free-counter-resets-after-30-days', 0);
+    }
+
+    private function usageProResets(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000009', 'ProReset');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        for ($i = 0; $i < 100; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        // Новый billing period
+        $newStart = $now->modify('+30 days');
+        $sub->setCurrentPeriodStart($newStart);
+        $sub->setCurrentPeriodEnd($newStart->modify('+30 days'));
+        $this->doctrine->getManager()->flush();
+
+        $this->usage->recordAction($u, $newStart);
+        $em = $this->doctrine->getManager();
+        $c = $em->getRepository(UsageCounter::class)->findOneBy(['user' => $u]);
+        if ($c?->getProActionsCount() !== 1) {
+            return ScenarioResult::fail('usage-pro-counter-resets-on-new-billing-period', 0, "после нового периода count = {$c?->getProActionsCount()}, ожидался 1");
+        }
+
+        return ScenarioResult::pass('usage-pro-counter-resets-on-new-billing-period', 0);
+    }
+
+    private function usageProLimitBlocks(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000010', 'ProLimit');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        for ($i = 0; $i < 1500; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        if ($this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('usage-pro-limit-blocks', 0, 'после 1500 canPerform всё ещё true');
+        }
+
+        return ScenarioResult::pass('usage-pro-limit-blocks', 0);
+    }
+
+    private function refundEligible(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000011', 'RefundOk');
+        $start = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->activatePro($u, $start, $start->modify('+30 days'), null, $start);
+        $check = $start->modify('+5 days');
+        if (!$this->subscriptions->isRefundEligible($sub, $check)) {
+            return ScenarioResult::fail('refund-eligible-within-window', 0, 'через 5 дней refund должен быть eligible');
+        }
+
+        return ScenarioResult::pass('refund-eligible-within-window', 0);
+    }
+
+    private function refundNotEligible(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000000012', 'RefundNo');
+        $start = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->activatePro($u, $start, $start->modify('+30 days'), null, $start);
+        $check = $start->modify('+8 days');
+        if ($this->subscriptions->isRefundEligible($sub, $check)) {
+            return ScenarioResult::fail('refund-not-eligible-after-window', 0, 'через 8 дней refund не должен быть eligible');
+        }
+
+        return ScenarioResult::pass('refund-not-eligible-after-window', 0);
     }
 
     private function setupFreshAssistant(): User
