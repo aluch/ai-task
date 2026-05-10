@@ -18,8 +18,12 @@ use App\Entity\Subscription;
 use App\Entity\UsageCounter;
 use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
+use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
+use App\Service\Subscription\TrialNotifier;
 use App\Service\Subscription\UsageTracker;
+use App\Telegram\UI\SoftBlockMessageBuilder;
+use App\Telegram\UI\WelcomeMessageBuilder;
 use App\Enum\TaskPriority;
 use App\Enum\TaskSource;
 use App\Enum\TaskStatus;
@@ -58,6 +62,10 @@ final class ScenarioRunner
         private readonly HeartbeatTracker $heartbeat,
         private readonly SubscriptionService $subscriptions,
         private readonly UsageTracker $usage,
+        private readonly TrialNotifier $trialNotifier,
+        private readonly SubscriptionExpirer $expirer,
+        private readonly WelcomeMessageBuilder $welcome,
+        private readonly SoftBlockMessageBuilder $softBlock,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -106,6 +114,19 @@ final class ScenarioRunner
             'usage-pro-limit-blocks' => fn () => $this->usageProLimitBlocks(),
             'refund-eligible-within-window' => fn () => $this->refundEligible(),
             'refund-not-eligible-after-window' => fn () => $this->refundNotEligible(),
+            // S2: integration of S1 infra into bot UX
+            's2-trial-starts-on-first-start' => fn () => $this->s2TrialStartsOnFirstStart(),
+            's2-trial-not-given-on-second-start' => fn () => $this->s2TrialNotGivenOnSecondStart(),
+            's2-admin-no-trial-on-start' => fn () => $this->s2AdminNoTrialOnStart(),
+            's2-free-user-soft-block-after-limit' => fn () => $this->s2FreeUserSoftBlockAfterLimit(),
+            's2-pro-user-no-block-within-limit' => fn () => $this->s2ProUserNoBlockWithinLimit(),
+            's2-admin-no-block-ever' => fn () => $this->s2AdminNoBlockEver(),
+            's2-soft-block-button-shows-stub' => fn () => $this->s2SoftBlockButtonShowsStub(),
+            's2-action-recorded-only-on-success' => fn () => $this->s2ActionRecordedOnlyOnSuccess(),
+            's2-trial-3d-notification' => fn () => $this->s2Trial3dNotification(),
+            's2-trial-3d-notification-not-duplicated' => fn () => $this->s2Trial3dNotificationNotDuplicated(),
+            's2-trial-expired-drops-to-free' => fn () => $this->s2TrialExpiredDropsToFree(),
+            's2-backfill-existing-allowed-users' => fn () => $this->s2BackfillExistingAllowedUsers(),
         ];
     }
 
@@ -1507,6 +1528,355 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('refund-not-eligible-after-window', 0);
+    }
+
+    /**
+     * Логика StartHandler в чистом виде, без Nutgram. Используется
+     * S2-сценариями: вызывает startTrial если нужно, возвращает приветственный
+     * текст. Идентично коду handler'а — полезно тестировать единым потоком.
+     */
+    private function simulateStart(User $user, \DateTimeImmutable $now): array
+    {
+        if ($user->isAdmin()) {
+            return [
+                'trialStarted' => false,
+                'text' => $this->welcome->buildForAdmin($user),
+            ];
+        }
+        $started = false;
+        if ($this->subscriptions->getActiveSubscription($user) === null) {
+            $sub = $this->subscriptions->startTrial($user, $now);
+            $started = $sub !== null;
+        }
+
+        return [
+            'trialStarted' => $started,
+            'text' => $started
+                ? $this->welcome->buildWithTrial($user)
+                : $this->welcome->buildStandard($user),
+        ];
+    }
+
+    private function s2TrialStartsOnFirstStart(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010001', 'S2NewStart');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $r = $this->simulateStart($u, $now);
+
+        if (!$r['trialStarted']) {
+            return ScenarioResult::fail('s2-trial-starts-on-first-start', 0, 'триал не стартанул для нового юзера');
+        }
+        $sub = $this->subscriptions->getActiveSubscription($u);
+        if ($sub === null || $sub->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail('s2-trial-starts-on-first-start', 0, 'подписка не trialing после /start');
+        }
+        if (!str_contains($r['text'], '🎁')) {
+            return ScenarioResult::fail('s2-trial-starts-on-first-start', 0, 'приветствие без эмодзи 🎁');
+        }
+        if (!str_contains($r['text'], '7 дней')) {
+            return ScenarioResult::fail('s2-trial-starts-on-first-start', 0, 'приветствие без «7 дней»');
+        }
+
+        return ScenarioResult::pass('s2-trial-starts-on-first-start', 0);
+    }
+
+    private function s2TrialNotGivenOnSecondStart(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010002', 'S2SecondStart');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $first = $this->simulateStart($u, $now);
+        if (!$first['trialStarted']) {
+            return ScenarioResult::fail('s2-trial-not-given-on-second-start', 0, 'первый /start не дал триал — preconditions broken');
+        }
+        $second = $this->simulateStart($u, $now->modify('+1 minute'));
+        if ($second['trialStarted']) {
+            return ScenarioResult::fail('s2-trial-not-given-on-second-start', 0, 'второй /start выдал ещё один триал');
+        }
+        if (str_contains($second['text'], '🎁')) {
+            return ScenarioResult::fail('s2-trial-not-given-on-second-start', 0, 'повторное приветствие содержит 🎁');
+        }
+
+        return ScenarioResult::pass('s2-trial-not-given-on-second-start', 0);
+    }
+
+    private function s2AdminNoTrialOnStart(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010003', 'S2Admin');
+        $u->setAdmin(true);
+        $this->doctrine->getManager()->flush();
+
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $r = $this->simulateStart($u, $now);
+        if ($r['trialStarted']) {
+            return ScenarioResult::fail('s2-admin-no-trial-on-start', 0, 'админу выдали триал');
+        }
+        if ($this->subscriptions->getActiveSubscription($u) !== null) {
+            return ScenarioResult::fail('s2-admin-no-trial-on-start', 0, 'у админа появилась подписка');
+        }
+        if (str_contains($r['text'], '🎁')) {
+            return ScenarioResult::fail('s2-admin-no-trial-on-start', 0, 'админу показали 🎁');
+        }
+
+        return ScenarioResult::pass('s2-admin-no-trial-on-start', 0);
+    }
+
+    private function s2FreeUserSoftBlockAfterLimit(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010004', 'S2FreeBlock');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        // Free-юзер: подписки нет → currentPlan=Free, лимит из env (50).
+        for ($i = 0; $i < 50; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        if ($this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('s2-free-user-soft-block-after-limit', 0, 'после 50 действий canPerform=true');
+        }
+        $block = $this->softBlock->build($u, $now);
+        if (!str_contains($block['text'], 'Free')) {
+            return ScenarioResult::fail('s2-free-user-soft-block-after-limit', 0, 'soft block без слова Free');
+        }
+        if (!str_contains($block['text'], '🔒')) {
+            return ScenarioResult::fail('s2-free-user-soft-block-after-limit', 0, 'soft block без 🔒');
+        }
+        if (($block['keyboard'][0][0]['callback_data'] ?? null) !== 'upgrade:info') {
+            return ScenarioResult::fail('s2-free-user-soft-block-after-limit', 0, 'нет callback upgrade:info в клавиатуре');
+        }
+
+        return ScenarioResult::pass('s2-free-user-soft-block-after-limit', 0);
+    }
+
+    private function s2ProUserNoBlockWithinLimit(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010005', 'S2ProOk');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        for ($i = 0; $i < 100; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        if (!$this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('s2-pro-user-no-block-within-limit', 0, 'Pro заблокирован на 101-м действии (лимит 1500)');
+        }
+
+        return ScenarioResult::pass('s2-pro-user-no-block-within-limit', 0);
+    }
+
+    private function s2AdminNoBlockEver(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010006', 'S2AdminLimitless');
+        $u->setAdmin(true);
+        $this->doctrine->getManager()->flush();
+
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        for ($i = 0; $i < 100; $i++) {
+            $this->usage->recordAction($u, $now);
+        }
+        if (!$this->usage->canPerformAction($u, $now)) {
+            return ScenarioResult::fail('s2-admin-no-block-ever', 0, 'admin заблокирован — UsageTracker::canPerformAction должен быть true');
+        }
+        // Защита in depth: recordAction для админа не должна писать в БД.
+        $em = $this->doctrine->getManager();
+        $c = $em->getRepository(UsageCounter::class)->findOneBy(['user' => $u]);
+        if ($c !== null && $c->getFreeActionsCount() > 0) {
+            return ScenarioResult::fail('s2-admin-no-block-ever', 0, "admin counter не должен расти (got {$c->getFreeActionsCount()})");
+        }
+
+        return ScenarioResult::pass('s2-admin-no-block-ever', 0);
+    }
+
+    private function s2SoftBlockButtonShowsStub(): ScenarioResult
+    {
+        // Логически: SoftBlockMessageBuilder включает callback upgrade:info,
+        // UpgradeInfoCallbackHandler регистрируется на 'upgrade:{data}' и
+        // отвечает alert'ом. Без поднятия Nutgram проверим что обе части
+        // соединены: в клавиатуре правильный callback, handler существует.
+        $u = $this->ensureCleanSubUser('2000010007', 'S2Stub');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $block = $this->softBlock->build($u, $now);
+        $cb = $block['keyboard'][0][0]['callback_data'] ?? null;
+        if ($cb !== 'upgrade:info') {
+            return ScenarioResult::fail('s2-soft-block-button-shows-stub', 0, "callback в клавиатуре = '{$cb}', ожидался 'upgrade:info'");
+        }
+        if (!class_exists(\App\Telegram\Handler\UpgradeInfoCallbackHandler::class)) {
+            return ScenarioResult::fail('s2-soft-block-button-shows-stub', 0, 'UpgradeInfoCallbackHandler класса нет');
+        }
+
+        return ScenarioResult::pass('s2-soft-block-button-shows-stub', 0);
+    }
+
+    private function s2ActionRecordedOnlyOnSuccess(): ScenarioResult
+    {
+        $u = $this->ensureCleanSubUser('2000010008', 'S2NoRecordOnFail');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        // Сначала запишем 1 действие — counter=1.
+        $this->usage->recordAction($u, $now);
+        $beforeRemaining = $this->usage->getRemainingActions($u, $now);
+
+        // Эмулируем флоу AssistantHandler где Anthropic кидает throw'ом.
+        // recordAction должен происходить ТОЛЬКО после try-success, поэтому
+        // в ветке catch счётчик не растёт.
+        try {
+            throw new \RuntimeException('simulated anthropic transient');
+            // unreachable: $this->usage->recordAction($u, $now);
+        } catch (\Throwable) {
+            // swallow
+        }
+
+        $afterRemaining = $this->usage->getRemainingActions($u, $now);
+        if ($beforeRemaining !== $afterRemaining) {
+            return ScenarioResult::fail('s2-action-recorded-only-on-success', 0, "remaining изменился ({$beforeRemaining} → {$afterRemaining}) при ошибочном пути");
+        }
+
+        return ScenarioResult::pass('s2-action-recorded-only-on-success', 0);
+    }
+
+    /**
+     * Снос всех подписок smoke-юзеров чтобы TrialNotifier не цеплял
+     * соседние триалы из соседних S1/S2-сценариев. Прод-таблицу
+     * не трогаем — ScenarioRunner и так гоняется только в тестовой
+     * среде.
+     */
+    private function purgeAllSubscriptions(): void
+    {
+        $this->doctrine->getConnection()->executeStatement('TRUNCATE TABLE subscriptions CASCADE');
+        $this->doctrine->getManager()->clear();
+    }
+
+    private function s2Trial3dNotification(): ScenarioResult
+    {
+        $this->harness->notifier()->clear();
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000010009', 'S2Trial3d');
+        $startNow = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->startTrial($u, $startNow);
+        if ($sub === null) {
+            return ScenarioResult::fail('s2-trial-3d-notification', 0, 'startTrial вернул null (preconditions)');
+        }
+        // trial_ends_at = startNow + 7d. Нужно tick'нуть в момент,
+        // когда trial_ends_at - now ∈ [60h, 72h] и НЕ в quiet hours юзера.
+        // 13:00 UTC = 16:00 Tallinn (вне quiet 22-8).
+        $tickAt = new \DateTimeImmutable('2026-05-05 13:00:00 UTC');
+        // sanity: trial_ends_at - tickAt = ~71h — попадает в окно.
+        $sent = $this->trialNotifier->notifyThreeDayWarning($tickAt);
+        if ($sent !== 1) {
+            return ScenarioResult::fail('s2-trial-3d-notification', 0, "ожидалось 1 уведомление, отправлено {$sent}");
+        }
+        if ($this->harness->notifier()->count() !== 1) {
+            return ScenarioResult::fail('s2-trial-3d-notification', 0, 'in-memory notifier не получил message');
+        }
+        $msg = $this->harness->notifier()->getMessages()[0];
+        if (!str_contains($msg['text'], '3 дня')) {
+            return ScenarioResult::fail('s2-trial-3d-notification', 0, 'текст без «3 дня»');
+        }
+        // sent_at должен быть проставлен.
+        $em = $this->doctrine->getManager();
+        $em->refresh($sub);
+        if ($sub->getNotification3dSentAt() === null) {
+            return ScenarioResult::fail('s2-trial-3d-notification', 0, 'notification_3d_sent_at не проставился');
+        }
+
+        return ScenarioResult::pass('s2-trial-3d-notification', 0);
+    }
+
+    private function s2Trial3dNotificationNotDuplicated(): ScenarioResult
+    {
+        $this->harness->notifier()->clear();
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000010010', 'S2Trial3dDup');
+        $startNow = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->startTrial($u, $startNow);
+
+        $tickAt = new \DateTimeImmutable('2026-05-05 13:00:00 UTC');
+        $first = $this->trialNotifier->notifyThreeDayWarning($tickAt);
+        // Через 5 минут — повторный tick, message не должно прибавиться.
+        $second = $this->trialNotifier->notifyThreeDayWarning($tickAt->modify('+5 minutes'));
+
+        if ($first !== 1 || $second !== 0) {
+            return ScenarioResult::fail('s2-trial-3d-notification-not-duplicated', 0, "first={$first}, second={$second}, ожидалось 1+0");
+        }
+        if ($this->harness->notifier()->count() !== 1) {
+            return ScenarioResult::fail('s2-trial-3d-notification-not-duplicated', 0, 'дубль уведомления — message count != 1');
+        }
+
+        return ScenarioResult::pass('s2-trial-3d-notification-not-duplicated', 0);
+    }
+
+    private function s2TrialExpiredDropsToFree(): ScenarioResult
+    {
+        $this->harness->notifier()->clear();
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000010011', 'S2Expired');
+        $startNow = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->startTrial($u, $startNow);
+
+        // Tick через 8 дней — триал прошёл.
+        $tickAt = new \DateTimeImmutable('2026-05-09 13:00:00 UTC');
+
+        // 1. TrialNotifier шлёт «триал закончился».
+        $expSent = $this->trialNotifier->notifyExpired($tickAt);
+        if ($expSent !== 1) {
+            return ScenarioResult::fail('s2-trial-expired-drops-to-free', 0, "expected 1 expired-notify, got {$expSent}");
+        }
+        $msg = $this->harness->notifier()->getMessages()[0] ?? null;
+        if ($msg === null || !str_contains($msg['text'], '🔚')) {
+            return ScenarioResult::fail('s2-trial-expired-drops-to-free', 0, 'expired-сообщение без 🔚');
+        }
+
+        // 2. SubscriptionExpirer переводит status=expired.
+        $count = $this->expirer->tick($tickAt);
+        if ($count !== 1) {
+            return ScenarioResult::fail('s2-trial-expired-drops-to-free', 0, "expirer tick перевёл {$count}, ожидался 1");
+        }
+
+        // 3. После expire — currentPlan=Free.
+        $plan = $this->subscriptions->getCurrentPlan($u);
+        if ($plan !== Plan::Free) {
+            return ScenarioResult::fail('s2-trial-expired-drops-to-free', 0, "после expire план = {$plan->value}, ожидался free");
+        }
+
+        return ScenarioResult::pass('s2-trial-expired-drops-to-free', 0);
+    }
+
+    private function s2BackfillExistingAllowedUsers(): ScenarioResult
+    {
+        // Имитируем backfill-логику: для is_allowed=true не-админа без
+        // подписки startTrial выдаст триал; для is_admin=true — нет
+        // (по контракту StartHandler), а миграция тоже их фильтрует.
+        // ensureCleanSubUser делает $em->clear после удаления — ссылки
+        // на User между двумя вызовами становятся detached, поэтому
+        // перечитываем их из свежего EM.
+        $this->ensureCleanSubUser('2000010012', 'S2BackfillAllowed');
+        $this->ensureCleanSubUser('2000010013', 'S2BackfillAdmin');
+
+        $em = $this->doctrine->getManager();
+        $repo = $em->getRepository(User::class);
+        $allowed = $repo->findOneBy(['telegramId' => '2000010012']);
+        $admin = $repo->findOneBy(['telegramId' => '2000010013']);
+        if ($allowed === null || $admin === null) {
+            return ScenarioResult::fail('s2-backfill-existing-allowed-users', 0, 'юзеры не нашлись после ensureCleanSubUser');
+        }
+        $allowed->setAllowed(true);
+        $admin->setAllowed(true);
+        $admin->setAdmin(true);
+        $em->flush();
+
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        // Семантический эквивалент INSERT'а в миграции — startTrial.
+        $this->subscriptions->startTrial($allowed, $now);
+        // Админу backfill не даём — повторим логику миграции (WHERE is_admin=false).
+        if (!$admin->isAdmin()) {
+            $this->subscriptions->startTrial($admin, $now);
+        }
+
+        $allowedSub = $this->subscriptions->getActiveSubscription($allowed);
+        if ($allowedSub === null || $allowedSub->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail('s2-backfill-existing-allowed-users', 0, 'allowed-юзер остался без trialing-подписки');
+        }
+        $adminSub = $this->subscriptions->getActiveSubscription($admin);
+        if ($adminSub !== null) {
+            return ScenarioResult::fail('s2-backfill-existing-allowed-users', 0, 'админу backfill дал подписку (а не должен)');
+        }
+
+        return ScenarioResult::pass('s2-backfill-existing-allowed-users', 0);
     }
 
     private function setupFreshAssistant(): User

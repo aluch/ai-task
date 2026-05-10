@@ -8,6 +8,8 @@ use App\Message\CheckDeadlineRemindersMessage;
 use App\Message\CheckPeriodicRemindersMessage;
 use App\Message\CheckSingleRemindersMessage;
 use App\Message\CheckSnoozeWakeupsMessage;
+use App\Message\ExpireSubscriptionsMessage;
+use App\Message\NotifyTrialEndingMessage;
 use Symfony\Component\Scheduler\Attribute\AsSchedule;
 use Symfony\Component\Scheduler\RecurringMessage;
 use Symfony\Component\Scheduler\Schedule;
@@ -42,6 +44,12 @@ final class ReminderSchedule implements ScheduleProviderInterface
             ->add(RecurringMessage::every('1 minute', new CheckDeadlineRemindersMessage()))
             ->add(RecurringMessage::every('1 minute', new CheckPeriodicRemindersMessage()))
             ->add(RecurringMessage::every('1 minute', new CheckSnoozeWakeupsMessage()))
-            ->add(RecurringMessage::every('1 minute', new CheckSingleRemindersMessage()));
+            ->add(RecurringMessage::every('1 minute', new CheckSingleRemindersMessage()))
+            // Подписочные тики реже — это не пользовательские напоминания,
+            // а фоновое обслуживание (триальные предупреждения / истечения).
+            // Окна notify-проверок (60h..72h, 12h..24h) с запасом ловят
+            // 5-минутный шаг.
+            ->add(RecurringMessage::every('5 minutes', new NotifyTrialEndingMessage()))
+            ->add(RecurringMessage::every('5 minutes', new ExpireSubscriptionsMessage()));
     }
 }
