@@ -17,13 +17,16 @@ use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\ListCallbackHandler;
 use App\Telegram\Handler\ReminderCallbackHandler;
 use App\Telegram\Handler\ResetHandler;
+use App\Telegram\Handler\SubscriptionCallbackHandler;
+use App\Telegram\Handler\SubscriptionHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
 use App\Telegram\Handler\SnoozeHandler;
 use App\Telegram\Handler\StartHandler;
 use App\Telegram\Handler\UnblockHandler;
-use App\Telegram\Handler\UpgradeInfoCallbackHandler;
+use App\Telegram\Handler\UpgradeCallbackHandler;
+use App\Telegram\Handler\UpgradeHandler;
 use App\Service\TelegramUserResolver;
 use App\Service\UserActivityTracker;
 use App\Telegram\Middleware\WhitelistMiddleware;
@@ -50,7 +53,10 @@ class HandlerRegistry
         private readonly ResetHandler $resetHandler,
         private readonly ConfirmationCallbackHandler $confirmCallbackHandler,
         private readonly AccessRequestCallbackHandler $accessCallbackHandler,
-        private readonly UpgradeInfoCallbackHandler $upgradeInfoCallbackHandler,
+        private readonly UpgradeHandler $upgradeHandler,
+        private readonly UpgradeCallbackHandler $upgradeCallbackHandler,
+        private readonly SubscriptionHandler $subscriptionHandler,
+        private readonly SubscriptionCallbackHandler $subscriptionCallbackHandler,
         private readonly AdminHandler $adminHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
@@ -109,6 +115,10 @@ class HandlerRegistry
         $bot->onCommand('admin', $this->adminHandler);
         $bot->onCommand('admin {args}', $this->adminHandler);
 
+        // Подписки (S3): пользовательские команды.
+        $bot->onCommand('upgrade', $this->upgradeHandler);
+        $bot->onCommand('subscription', $this->subscriptionHandler);
+
         // Callback queries
         $bot->onCallbackQueryData('dep:{data}', $this->depCallbackHandler);
         $bot->onCallbackQueryData('done:{data}', $this->taskActionCallbackHandler);
@@ -119,7 +129,8 @@ class HandlerRegistry
         $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
         $bot->onCallbackQueryData('confirm:{data}', $this->confirmCallbackHandler);
         $bot->onCallbackQueryData('access:{data}', $this->accessCallbackHandler);
-        $bot->onCallbackQueryData('upgrade:{data}', $this->upgradeInfoCallbackHandler);
+        $bot->onCallbackQueryData('upgrade:{data}', $this->upgradeCallbackHandler);
+        $bot->onCallbackQueryData('subscription:{data}', $this->subscriptionCallbackHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;

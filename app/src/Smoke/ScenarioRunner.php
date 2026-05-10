@@ -23,6 +23,8 @@ use App\Service\Subscription\SubscriptionService;
 use App\Service\Subscription\TrialNotifier;
 use App\Service\Subscription\UsageTracker;
 use App\Telegram\UI\SoftBlockMessageBuilder;
+use App\Telegram\UI\SubscriptionMessageBuilder;
+use App\Telegram\UI\UpgradeMessageBuilder;
 use App\Telegram\UI\WelcomeMessageBuilder;
 use App\Enum\TaskPriority;
 use App\Enum\TaskSource;
@@ -66,6 +68,8 @@ final class ScenarioRunner
         private readonly SubscriptionExpirer $expirer,
         private readonly WelcomeMessageBuilder $welcome,
         private readonly SoftBlockMessageBuilder $softBlock,
+        private readonly UpgradeMessageBuilder $upgradeBuilder,
+        private readonly SubscriptionMessageBuilder $subBuilder,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -127,6 +131,12 @@ final class ScenarioRunner
             's2-trial-3d-notification-not-duplicated' => fn () => $this->s2Trial3dNotificationNotDuplicated(),
             's2-trial-expired-drops-to-free' => fn () => $this->s2TrialExpiredDropsToFree(),
             's2-backfill-existing-allowed-users' => fn () => $this->s2BackfillExistingAllowedUsers(),
+            // S3: user-facing /upgrade /subscription + админские grant_*/stats
+            's3-upgrade-shows-pro-pitch-for-free-user' => fn () => $this->s3UpgradeProPitchForFree(),
+            's3-upgrade-shows-active-info-for-pro-user' => fn () => $this->s3UpgradeShowsActiveForPro(),
+            's3-upgrade-pay-shows-stub-message' => fn () => $this->s3UpgradePayShowsStub(),
+            's3-subscription-shows-trial-status' => fn () => $this->s3SubscriptionShowsTrial(),
+            's3-subscription-cancel-flow' => fn () => $this->s3SubscriptionCancelFlow(),
         ];
     }
 
@@ -1686,8 +1696,8 @@ final class ScenarioRunner
     private function s2SoftBlockButtonShowsStub(): ScenarioResult
     {
         // Логически: SoftBlockMessageBuilder включает callback upgrade:info,
-        // UpgradeInfoCallbackHandler регистрируется на 'upgrade:{data}' и
-        // отвечает alert'ом. Без поднятия Nutgram проверим что обе части
+        // UpgradeCallbackHandler (S3) регистрируется на 'upgrade:{data}' и
+        // роутит info → /upgrade. Без поднятия Nutgram проверим что обе части
         // соединены: в клавиатуре правильный callback, handler существует.
         $u = $this->ensureCleanSubUser('2000010007', 'S2Stub');
         $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
@@ -1696,8 +1706,8 @@ final class ScenarioRunner
         if ($cb !== 'upgrade:info') {
             return ScenarioResult::fail('s2-soft-block-button-shows-stub', 0, "callback в клавиатуре = '{$cb}', ожидался 'upgrade:info'");
         }
-        if (!class_exists(\App\Telegram\Handler\UpgradeInfoCallbackHandler::class)) {
-            return ScenarioResult::fail('s2-soft-block-button-shows-stub', 0, 'UpgradeInfoCallbackHandler класса нет');
+        if (!class_exists(\App\Telegram\Handler\UpgradeCallbackHandler::class)) {
+            return ScenarioResult::fail('s2-soft-block-button-shows-stub', 0, 'UpgradeCallbackHandler класса нет');
         }
 
         return ScenarioResult::pass('s2-soft-block-button-shows-stub', 0);
@@ -1877,6 +1887,124 @@ final class ScenarioRunner
         }
 
         return ScenarioResult::pass('s2-backfill-existing-allowed-users', 0);
+    }
+
+    // ────────────────────────────── S3 ──────────────────────────────
+
+    private function s3UpgradeProPitchForFree(): ScenarioResult
+    {
+        $name = 's3-upgrade-shows-pro-pitch-for-free-user';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020001', 'S3FreeUpgrade');
+        $payload = $this->upgradeBuilder->buildForFree($u);
+
+        if (!str_contains($payload['text'], '1500')) {
+            return ScenarioResult::fail($name, 0, 'нет упоминания 1500 действий');
+        }
+        $cb = array_column($payload['keyboard'][0] ?? [], 'callback_data');
+        if (!in_array('upgrade:pay', $cb, true) || !in_array('upgrade:later', $cb, true)) {
+            return ScenarioResult::fail($name, 0, 'нет кнопок upgrade:pay и upgrade:later');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3UpgradeShowsActiveForPro(): ScenarioResult
+    {
+        $name = 's3-upgrade-shows-active-info-for-pro-user';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020002', 'S3ProUpgrade');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        $sub = $this->subscriptions->getActiveSubscription($u);
+        if ($sub === null) {
+            return ScenarioResult::fail($name, 0, 'не нашёл активную Pro-подписку');
+        }
+        $payload = $this->upgradeBuilder->buildForActivePro($u, $sub);
+        if (!str_contains($payload['text'], 'уже активна Pro')) {
+            return ScenarioResult::fail($name, 0, 'нет фразы «уже активна Pro»');
+        }
+        if ($payload['keyboard'] !== null) {
+            return ScenarioResult::fail($name, 0, 'у активного Pro в /upgrade не должно быть клавиатуры');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3UpgradePayShowsStub(): ScenarioResult
+    {
+        $name = 's3-upgrade-pay-shows-stub-message';
+        $stub = $this->upgradeBuilder->buildPayStub();
+        if (!str_contains($stub, 'Оплата') || !str_contains($stub, 'скоро')) {
+            return ScenarioResult::fail($name, 0, 'stub оплаты не содержит ожидаемый текст');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3SubscriptionShowsTrial(): ScenarioResult
+    {
+        $name = 's3-subscription-shows-trial-status';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020003', 'S3SubTrial');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->startTrial($u, $now);
+        if ($sub === null) {
+            return ScenarioResult::fail($name, 0, 'startTrial вернул null');
+        }
+        $payload = $this->subBuilder->buildForTrial($u, $sub, $now);
+        $expectedDate = $sub->getTrialEndsAt()
+            ?->setTimezone(new \DateTimeZone($u->getTimezone()))
+            ->format('d.m.Y');
+        if ($expectedDate === null || !str_contains($payload['text'], $expectedDate)) {
+            return ScenarioResult::fail($name, 0, "нет даты конца триала {$expectedDate}");
+        }
+        if (!str_contains($payload['text'], 'Триал')) {
+            return ScenarioResult::fail($name, 0, 'нет слова Триал');
+        }
+        $cb = $payload['keyboard'][0][0]['callback_data'] ?? null;
+        if ($cb !== 'upgrade:info') {
+            return ScenarioResult::fail($name, 0, "ожидался upgrade:info, получен {$cb}");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3SubscriptionCancelFlow(): ScenarioResult
+    {
+        $name = 's3-subscription-cancel-flow';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020004', 'S3SubCancel');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        $sub = $this->subscriptions->getActiveSubscription($u);
+        if ($sub === null) {
+            return ScenarioResult::fail($name, 0, 'не нашёл активную Pro-подписку');
+        }
+        // 1. confirm-экран.
+        $confirm = $this->subBuilder->buildCancelConfirm($u, $sub);
+        $cbConfirm = $confirm['keyboard'][0][0]['callback_data'] ?? null;
+        $cbAbort = $confirm['keyboard'][0][1]['callback_data'] ?? null;
+        if ($cbConfirm !== 'subscription:cancel:confirm' || $cbAbort !== 'subscription:cancel:abort') {
+            return ScenarioResult::fail($name, 0, "ожидались callback'и subscription:cancel:{confirm,abort}, получены {$cbConfirm}|{$cbAbort}");
+        }
+        // 2. реальная отмена.
+        $this->subscriptions->cancel($sub, $now);
+        $fresh = $this->subscriptions->getActiveSubscription($u);
+        if ($fresh?->getStatus() !== SubscriptionStatus::Cancelled) {
+            return ScenarioResult::fail($name, 0, 'после cancel статус не Cancelled');
+        }
+        // План остаётся Pro до конца currentPeriodEnd.
+        if ($this->subscriptions->getCurrentPlan($u) !== Plan::Pro) {
+            return ScenarioResult::fail($name, 0, 'после cancel currentPlan != Pro (cancelled должна сохранять доступ)');
+        }
+        // /subscription в этом состоянии рисует Cancelled-вариант.
+        $payload = $this->subBuilder->buildForCancelled($u, $fresh, $now);
+        if (!str_contains($payload['text'], 'отменена')) {
+            return ScenarioResult::fail($name, 0, 'cancelled-экран без слова «отменена»');
+        }
+
+        return ScenarioResult::pass($name, 0);
     }
 
     private function setupFreshAssistant(): User
