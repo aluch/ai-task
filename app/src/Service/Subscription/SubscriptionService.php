@@ -61,7 +61,9 @@ class SubscriptionService
 
     /**
      * Активирует Pro (после успешного платежа). Если был триал/cancelled —
-     * переводим на Active с новым billing-периодом.
+     * переводим на Active с новым billing-периодом. Если до этого статус
+     * был Trialing — фиксируем convertedFromTrialAt для аналитики
+     * конверсии (см. SubscriptionStatsService).
      */
     public function activatePro(
         User $user,
@@ -83,12 +85,16 @@ class SubscriptionService
             );
             $em->persist($sub);
         } else {
+            $wasTrial = $sub->getStatus() === SubscriptionStatus::Trialing;
             $sub->setPlan(Plan::Pro);
             $sub->setStatus(SubscriptionStatus::Active);
             $sub->setCurrentPeriodStart($periodStart);
             $sub->setCurrentPeriodEnd($periodEnd);
             $sub->setCancelledAt(null);
             $sub->setTrialEndsAt(null);
+            if ($wasTrial && $sub->getConvertedFromTrialAt() === null) {
+                $sub->setConvertedFromTrialAt($now);
+            }
         }
         if ($externalSubscriptionId !== null) {
             $sub->setExternalSubscriptionId($externalSubscriptionId);

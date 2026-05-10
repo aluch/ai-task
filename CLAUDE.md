@@ -288,7 +288,7 @@ bot:
   - `block_task` / `unblock_task` — с проверкой циклов.
   - `suggest_tasks` — вызов TaskAdvisor (аналог /free, но только текст без кнопок).
 
-  После любых изменений в Ассистенте или tools — `make smoke-all` (полный suite — 55 сценариев на 2026-05-10). В `smoke:all` есть `sleep(8)` между assistant-сценариями, чтобы не упираться в 30k TPM Anthropic rate-limit.
+  После любых изменений в Ассистенте или tools — `make smoke-all` (полный suite — 63 сценария на 2026-05-10). В `smoke:all` есть `sleep(8)` между assistant-сценариями, чтобы не упираться в 30k TPM Anthropic rate-limit.
 - `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
 - `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
 - `App\AI\DTO\TaskSuggestionDTO` + `SuggestedTask` — DTO подборки задач (suggestions, reasoning, totalEstimatedMinutes, noMatchReason).
@@ -322,9 +322,9 @@ Haiku выбрана для парсинга: достаточно умна дл
 
 ## Smoke-тесты
 
-`make smoke-all` прогоняет полный suite сценариев (55 на 2026-05-10:
+`make smoke-all` прогоняет полный suite сценариев (63 на 2026-05-10:
 reminder-пайплайн, ассистент с tool calling, whitelist, scheduler heartbeat,
-S1 подписки, S2 интеграция в UX). Reminder-сценарии не дёргают Telegram
+S1 подписки, S2 интеграция в UX, S3 user/admin команды). Reminder-сценарии не дёргают Telegram
 API (используется `InMemoryTelegramNotifier`) и Anthropic; ассистент-
 сценарии бьют в реальный Anthropic. Время — фиксируется через `FrozenClock`.
 **После любых изменений в ReminderSender, handler'ах, правилах quiet
@@ -374,37 +374,43 @@ Health: `App\Controller\HealthController` (`GET /health`) — проверяет
 
 GitHub Actions workflow `.github/workflows/deploy.yml` — push в `main` (и `workflow_dispatch` для ручных перевыкаток) запускает `bin/deploy.sh` на VPS через SSH. После деплоя — 60-секундный poll `https://${DOMAIN}/health` (12 попыток × 5s), если не отвечает 200 — `exit 1`, CI помечает failure. Уведомление в Telegram через отдельного бота (`TG_NOTIFY_BOT_TOKEN`). `concurrency: deploy-prod` + `cancel-in-progress` гарантирует один деплой за раз. Подробно — `docs/ci-cd.md` (включая список GitHub Secrets и troubleshooting).
 
-## Подписки и биллинг (S1+S2)
+## Подписки и биллинг (S1+S2+S3)
 
 Plan-aware архитектура: `App\Domain\Subscription\Plan` (Free/Pro), `SubscriptionStatus` (trialing/active/past_due/cancelled/expired), `PaymentStatus`. Все суммы в копейках (`amountMinor: int`).
 
 Сущности:
-- `App\Entity\Subscription` — план + статус + период (`currentPeriodStart`/`End`), `trialEndsAt` для триала, `externalSubscriptionId` для будущей привязки к ЮKassa. В S2 добавлены `notification_3d_sent_at` / `_1d_sent_at` / `_expired_sent_at` для дедупа триальных уведомлений.
+- `App\Entity\Subscription` — план + статус + период (`currentPeriodStart`/`End`), `trialEndsAt` для триала, `externalSubscriptionId` для будущей привязки к ЮKassa. В S2 добавлены `notification_3d_sent_at` / `_1d_sent_at` / `_expired_sent_at` для дедупа триальных уведомлений. В S3 — `convertedFromTrialAt` (момент перехода триал→Pro, заполняется в `activatePro` если предыдущий статус был trialing; используется метрикой конверсии в `/admin stats`).
 - `App\Entity\Payment` — `amountMinor` (копейки), `currency`, `providerData` (JSON), привязка к user + опц. subscription.
 - `App\Entity\UsageCounter` — singleton-per-user (UNIQUE на user_id): отдельные счётчики для Free (скользящий 30-дневный период) и Pro (billing period подписки).
 - `User.isAdmin` — bool в БД, миграция bootstrap'ит из ADMIN_TELEGRAM_ID env. `AccessGate::isAdmin` теперь читает из БД (env используется только как маркер первого админа).
 
 Сервисы:
 - `App\Service\PlanCatalog` — типизированный доступ к limits/prices из `config/packages/subscription.yaml` (через env-переменные `LIMIT_FREE_ACTIONS`, `LIMIT_PRO_ACTIONS`, `PRICE_PRO_MONTHLY_RUB_MINOR`, `TRIAL_DAYS`, `REFUND_WINDOW_DAYS`).
-- `App\Service\Subscription\SubscriptionService` — `startTrial` (идемпотентен, защита от абуза), `activatePro`, `cancel` (доступ до `currentPeriodEnd`), `expire`, `getCurrentPlan`, `getActiveSubscription`, `isRefundEligible`.
+- `App\Service\Subscription\SubscriptionService` — `startTrial` (идемпотентен, защита от абуза), `activatePro` (фиксирует `convertedFromTrialAt` если был триал), `cancel` (доступ до `currentPeriodEnd`), `expire`, `getCurrentPlan`, `getActiveSubscription`, `isRefundEligible`. **S3:** `forceStartTrial` / `forceActivatePro` — админские force-методы для `/admin grant_*`: гасят существующую подписку в expired и создают новую (не идемпотентны).
 - `App\Service\Subscription\UsageTracker` — `recordAction` (+1 к счётчику с авто-сбросом при истёкшем периоде), `canPerformAction`, `getRemainingActions`, `getNextResetAt`. **Для админа все методы fast-path: `canPerformAction=true`, `recordAction=no-op`, `getRemainingActions=1_000_000`** — защита in depth от случайной потери лимита админу.
 - `App\Service\Subscription\TrialNotifier` — cron-уведомления о приближении и факте конца триала (3 дня / 1 день / истёк). Дедуп через `notification_*_sent_at`. Quiet hours соблюдаются для предупреждений, для «истёк» — нет.
 - `App\Service\Subscription\SubscriptionExpirer` — переводит истёкшие usable-подписки в `expired` через `SubscriptionService::expire`.
+- `App\Service\Subscription\SubscriptionStatsService` (S3) — собирает числа для `/admin stats`: пользователи (total/allowed/admins), подписки по статусам, MRR (active × цена Pro из конфига), активность за 7 дней (новые регистрации, стартованные триалы, конверсии, отмены). Ad-hoc COUNT-запросы, без хранилища метрик.
 
 Telegram-интеграция:
 - `App\Telegram\UI\WelcomeMessageBuilder` — три варианта приветствия (`buildWithTrial` / `buildStandard` / `buildForAdmin`). Текст изолирован, чтобы перевод не трогал handler.
-- `App\Telegram\UI\SoftBlockMessageBuilder` — текст + клавиатура для soft block при превышении лимита. Возвращает `{text, keyboard}` в формате Bot API.
+- `App\Telegram\UI\SoftBlockMessageBuilder` — текст + клавиатура для soft block при превышении лимита. Возвращает `{text, keyboard}` в формате Bot API. Кнопка `upgrade:info` ведёт на `/upgrade`.
+- `App\Telegram\UI\UpgradeMessageBuilder` (S3) — тексты `/upgrade` для четырёх статусов (admin / active Pro / trialing / free).
+- `App\Telegram\UI\SubscriptionMessageBuilder` (S3) — тексты `/subscription` для admin / active / trial / cancelled / free + confirm-экран отмены.
+- `App\Telegram\UI\AdminStatsMessageBuilder` (S3) — рендеринг статистики для `/admin stats`.
 - `App\Telegram\Handler\StartHandler` — на первом `/start` авто-стартует триал не-админам, показывает welcome с 🎁 если стартанул.
 - `App\Telegram\Handler\AssistantHandler` / `App\Telegram\Handler\FreeHandler` — `canPerformAction` ДО AI-вызова → soft block если false; `recordAction` ТОЛЬКО после успешного AI-вызова (на ошибке Anthropic лимит не тратится).
-- `App\Telegram\Handler\UpgradeInfoCallbackHandler` — заглушка для `upgrade:info` (alert «Скоро появится /upgrade»), полноценный экран в S3.
+- `App\Telegram\Handler\UpgradeHandler` + `UpgradeCallbackHandler` (S3) — `/upgrade` + callbacks `upgrade:info|pay|later`. Кнопка «Оплатить» пока заглушка («Оплата через Telegram Payments скоро появится»), S4 заменит на инвойс. `UpgradeInfoCallbackHandler` (S2) удалён.
+- `App\Telegram\Handler\SubscriptionHandler` + `SubscriptionCallbackHandler` (S3) — `/subscription` + двухшаговая отмена через callbacks `subscription:cancel`, `subscription:cancel:confirm|abort`.
+- `App\Telegram\Handler\AdminHandler` (S3 расширен) — подкоманды `grant_trial <tg_id>`, `grant_pro <tg_id> <days>`, `revoke_subscription <tg_id>`, `stats`. Confirm-flow через `AdminCallbackHandler` (callbacks `admin:grant_trial:<tg_id>:confirm|abort` и т.д.).
 
 Cron (через `ReminderSchedule`, каждые 5 минут):
 - `NotifyTrialEndingMessage` → `NotifyTrialEndingHandler` → `TrialNotifier::tick`.
 - `ExpireSubscriptionsMessage` → `ExpireSubscriptionsHandler` → `SubscriptionExpirer::tick`.
 
-Backfill: миграция `Version20260510000000` выдаёт триал всем существующим `is_allowed=true` не-админам (идемпотентна — повторный прогон не дублирует).
+Backfill: миграция `Version20260510000000` выдаёт триал всем существующим `is_allowed=true` не-админам (идемпотентна — повторный прогон не дублирует). Миграция `Version20260514000000` добавляет `subscriptions.converted_from_trial_at`.
 
-Что НЕ сделано (этапы далее): UI `/upgrade`/`/subscription` (S3), Telegram Payments (S4), auto-rebill (S5), реальный refund (S6). Подробно — `docs/subscriptions.md`.
+Что НЕ сделано (этапы далее): Telegram Payments (S4), auto-rebill (S5), реальный refund через ЮKassa Refund API (S6). Подробно — `docs/subscriptions.md`.
 
 ## Backups & Monitoring
 
