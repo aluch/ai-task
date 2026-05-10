@@ -4,37 +4,59 @@ declare(strict_types=1);
 
 namespace App\Telegram\Handler;
 
+use App\Service\Subscription\SubscriptionService;
 use App\Service\TelegramUserResolver;
+use App\Telegram\UI\WelcomeMessageBuilder;
+use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
 
+/**
+ * /start — точка входа в бота. Бизнес-логика:
+ *  1. Find-or-create User (через resolver).
+ *  2. Если не админ и нет подписки — стартуем 7-дневный триал.
+ *  3. В зависимости от «триал стартанул сейчас?» показываем разное
+ *     приветствие — текст в WelcomeMessageBuilder.
+ *
+ * Идемпотентность: повторный /start второй триал не выдаёт (защита от
+ * абуза в SubscriptionService::startTrial), поэтому WelcomeMessageBuilder
+ * увидит null и покажет стандартное приветствие без 🎁.
+ */
 class StartHandler
 {
     public function __construct(
         private readonly TelegramUserResolver $userResolver,
+        private readonly SubscriptionService $subscriptions,
+        private readonly WelcomeMessageBuilder $welcome,
+        private readonly LoggerInterface $logger,
     ) {
     }
 
     public function __invoke(Nutgram $bot): void
     {
         $user = $this->userResolver->resolve($bot);
-        $name = $user->getName() ?? 'друг';
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
-        $bot->sendMessage(
-            text: <<<MSG
-            Привет, {$name}! 👋
+        if ($user->isAdmin()) {
+            $bot->sendMessage(text: $this->welcome->buildForAdmin($user));
 
-            Я Помни — твой помощник по делам.
+            return;
+        }
 
-            Просто пиши свободным текстом, как другу:
-            • «Купить хлеб через час»
-            • «Завтра в 15:00 встреча, предупреди заранее»
-            • «Что у меня на сегодня?»
-            • «Свободен 2 часа, что взять?»
+        $trialJustStarted = false;
+        if ($this->subscriptions->getActiveSubscription($user) === null) {
+            $sub = $this->subscriptions->startTrial($user, $now);
+            if ($sub !== null) {
+                $trialJustStarted = true;
+                $this->logger->info('Trial auto-started on /start', [
+                    'user_id' => $user->getId()->toRfc4122(),
+                ]);
+            }
+        }
 
-            Я разберусь сам — создам задачу, напомню вовремя, подберу что сделать.
+        $text = $trialJustStarted
+            ? $this->welcome->buildWithTrial($user)
+            : $this->welcome->buildStandard($user);
 
-            Все команды — /help.
-            MSG,
-        );
+        $bot->sendMessage(text: $text);
     }
 }

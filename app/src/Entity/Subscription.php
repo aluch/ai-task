@@ -54,6 +54,20 @@ class Subscription
     #[ORM\Column(type: 'string', length: 128, nullable: true)]
     private ?string $externalSubscriptionId = null;
 
+    // name: явно — UnderscoreNamingStrategy не вставит подчёркивание между
+    // буквой и цифрой («notification3d» → «notification3d», без _).
+    /** Дедупликация уведомлений «триал заканчивается через 3 дня». */
+    #[ORM\Column(name: 'notification_3d_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notification3dSentAt = null;
+
+    /** Дедупликация уведомлений «триал заканчивается через 1 день». */
+    #[ORM\Column(name: 'notification_1d_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notification1dSentAt = null;
+
+    /** Дедупликация уведомлений «триал закончился». */
+    #[ORM\Column(name: 'notification_expired_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notificationExpiredSentAt = null;
+
     public function __construct(
         User $user,
         Plan $plan,
@@ -166,5 +180,41 @@ class Subscription
     public function isUsable(): bool
     {
         return $this->status->isUsable();
+    }
+
+    public function getNotification3dSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notification3dSentAt;
+    }
+
+    public function setNotification3dSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notification3dSentAt = $at;
+
+        return $this;
+    }
+
+    public function getNotification1dSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notification1dSentAt;
+    }
+
+    public function setNotification1dSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notification1dSentAt = $at;
+
+        return $this;
+    }
+
+    public function getNotificationExpiredSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notificationExpiredSentAt;
+    }
+
+    public function setNotificationExpiredSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notificationExpiredSentAt = $at;
+
+        return $this;
     }
 }
