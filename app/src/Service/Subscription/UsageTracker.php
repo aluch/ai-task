@@ -24,6 +24,13 @@ class UsageTracker
 
     public function recordAction(User $user, \DateTimeImmutable $now): UsageCounter
     {
+        // Админ — безлимитен и счётчик не нужен. Возвращаем dummy-инстанс,
+        // чтобы вызов был no-op даже если кто-то в коде забудет проверить
+        // isAdmin до record'а. Защита in depth.
+        if ($user->isAdmin()) {
+            return new UsageCounter($user);
+        }
+
         $counter = $this->ensureCounter($user);
         $plan = $this->subscriptions->getCurrentPlan($user);
 
@@ -42,6 +49,12 @@ class UsageTracker
 
     public function getRemainingActions(User $user, \DateTimeImmutable $now): int
     {
+        // Админ — безлимитен. Большое число (PHP_INT_MAX) скорее введёт в
+        // заблуждение в UI; вернём заведомо «много» = миллион.
+        if ($user->isAdmin()) {
+            return 1_000_000;
+        }
+
         $counter = $this->ensureCounter($user);
         $plan = $this->subscriptions->getCurrentPlan($user);
         $limit = $this->catalog->actionLimit($plan);
@@ -60,6 +73,10 @@ class UsageTracker
 
     public function canPerformAction(User $user, \DateTimeImmutable $now): bool
     {
+        if ($user->isAdmin()) {
+            return true;
+        }
+
         return $this->getRemainingActions($user, $now) > 0;
     }
 

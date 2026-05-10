@@ -23,6 +23,7 @@ use App\Telegram\Handler\ListHandler;
 use App\Telegram\Handler\SnoozeHandler;
 use App\Telegram\Handler\StartHandler;
 use App\Telegram\Handler\UnblockHandler;
+use App\Telegram\Handler\UpgradeInfoCallbackHandler;
 use App\Service\TelegramUserResolver;
 use App\Service\UserActivityTracker;
 use App\Telegram\Middleware\WhitelistMiddleware;
@@ -49,6 +50,7 @@ class HandlerRegistry
         private readonly ResetHandler $resetHandler,
         private readonly ConfirmationCallbackHandler $confirmCallbackHandler,
         private readonly AccessRequestCallbackHandler $accessCallbackHandler,
+        private readonly UpgradeInfoCallbackHandler $upgradeInfoCallbackHandler,
         private readonly AdminHandler $adminHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
@@ -117,6 +119,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('rem:{data}', $this->reminderCallbackHandler);
         $bot->onCallbackQueryData('confirm:{data}', $this->confirmCallbackHandler);
         $bot->onCallbackQueryData('access:{data}', $this->accessCallbackHandler);
+        $bot->onCallbackQueryData('upgrade:{data}', $this->upgradeInfoCallbackHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;

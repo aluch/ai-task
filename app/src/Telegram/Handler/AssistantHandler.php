@@ -10,8 +10,10 @@ use App\AI\ConversationHistoryStore;
 use App\AI\DTO\HistoryMessage;
 use App\AI\PendingActionStore;
 use App\Service\MarkdownToTelegramHtml;
+use App\Service\Subscription\UsageTracker;
 use App\Service\TelegramUserResolver;
 use App\Telegram\SearchDispatcher;
+use App\Telegram\UI\SoftBlockMessageBuilder;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Properties\ParseMode;
@@ -35,6 +37,8 @@ class AssistantHandler
         private readonly ConfirmationExecutor $executor,
         private readonly MarkdownToTelegramHtml $markdown,
         private readonly SearchDispatcher $searchDispatcher,
+        private readonly UsageTracker $usage,
+        private readonly SoftBlockMessageBuilder $softBlock,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -81,14 +85,29 @@ class AssistantHandler
             $replyToMsgId = $replyTo->message_id;
         }
 
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        // Лимит-чек до любого AI-вызова. recordAction вызывается ТОЛЬКО
+        // после успешного $assistant->handle, чтобы при ошибках Anthropic
+        // (timeout/rate-limit/5xx) пользователь не «терял» лимит.
+        // Для админа canPerformAction всегда true (см. UsageTracker).
+        if (!$this->usage->canPerformAction($user, $now)) {
+            $block = $this->softBlock->build($user, $now);
+            $bot->sendMessage(
+                text: $block['text'],
+                reply_markup: $this->arrayKeyboardToNutgram($block['keyboard']),
+            );
+
+            return;
+        }
+
         $thinking = $bot->sendMessage(text: '🤔 Думаю...');
         $chatId = $bot->chatId();
         $messageId = $thinking?->message_id;
 
-        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-
         try {
             $result = $this->assistant->handle($user, $text, $now, $replyToMsgId);
+            $this->usage->recordAction($user, $now);
 
             $this->logger->info('Assistant result', [
                 'user_id' => $user->getId()->toRfc4122(),
@@ -167,6 +186,26 @@ class AssistantHandler
             InlineKeyboardButton::make(text: '✅ Подтверждаю', callback_data: "confirm:{$confirmId}:yes"),
             InlineKeyboardButton::make(text: '❌ Отмена', callback_data: "confirm:{$confirmId}:no"),
         );
+    }
+
+    /**
+     * @param array<int, array<int, array{text: string, callback_data: string}>> $rows
+     */
+    private function arrayKeyboardToNutgram(array $rows): InlineKeyboardMarkup
+    {
+        $kb = InlineKeyboardMarkup::make();
+        foreach ($rows as $row) {
+            $buttons = [];
+            foreach ($row as $btn) {
+                $buttons[] = InlineKeyboardButton::make(
+                    text: $btn['text'],
+                    callback_data: $btn['callback_data'],
+                );
+            }
+            $kb->addRow(...$buttons);
+        }
+
+        return $kb;
     }
 
     private function sendOrEdit(

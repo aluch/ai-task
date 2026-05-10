@@ -16,7 +16,9 @@ use App\Enum\TaskStatus;
 use App\Repository\TaskRepository;
 use App\Service\FreeSuggestionStore;
 use App\Service\RelativeTimeParser;
+use App\Service\Subscription\UsageTracker;
 use App\Service\TelegramUserResolver;
+use App\Telegram\UI\SoftBlockMessageBuilder;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
 use SergiX44\Nutgram\Telegram\Types\Keyboard\InlineKeyboardButton;
@@ -30,6 +32,8 @@ class FreeHandler
         private readonly TaskAdvisor $advisor,
         private readonly RelativeTimeParser $timeParser,
         private readonly FreeSuggestionStore $store,
+        private readonly UsageTracker $usage,
+        private readonly SoftBlockMessageBuilder $softBlock,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -76,6 +80,19 @@ class FreeHandler
             return;
         }
 
+        // Лимит-чек до AI-вызова. recordAction только после успеха —
+        // если Anthropic зафейлил, лимит не тратим.
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        if (!$this->usage->canPerformAction($user, $now)) {
+            $block = $this->softBlock->build($user, $now);
+            $bot->sendMessage(
+                text: $block['text'],
+                reply_markup: $this->arrayKeyboardToNutgram($block['keyboard']),
+            );
+
+            return;
+        }
+
         $thinkingMsg = $bot->sendMessage(text: '🤔 Думаю, что бы тебе предложить...');
         $chatId = $bot->chatId();
         $messageId = $thinkingMsg?->message_id;
@@ -93,7 +110,28 @@ class FreeHandler
             return;
         }
 
+        $this->usage->recordAction($user, $now);
         $this->renderSuggestion($bot, $chatId, $messageId, $user, $dto, $minutes, $context, []);
+    }
+
+    /**
+     * @param array<int, array<int, array{text: string, callback_data: string}>> $rows
+     */
+    private function arrayKeyboardToNutgram(array $rows): InlineKeyboardMarkup
+    {
+        $kb = InlineKeyboardMarkup::make();
+        foreach ($rows as $row) {
+            $buttons = [];
+            foreach ($row as $btn) {
+                $buttons[] = InlineKeyboardButton::make(
+                    text: $btn['text'],
+                    callback_data: $btn['callback_data'],
+                );
+            }
+            $kb->addRow(...$buttons);
+        }
+
+        return $kb;
     }
 
     /**
