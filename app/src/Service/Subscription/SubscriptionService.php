@@ -103,6 +103,82 @@ class SubscriptionService
         return $sub;
     }
 
+    /**
+     * Админский force-trial. В отличие от {@see startTrial} — не идемпотентен:
+     * существующая подписка любого статуса схлопывается в expired, после чего
+     * создаётся свежий триал на trialDays. Используется только из /admin
+     * grant_trial.
+     */
+    public function forceStartTrial(User $user, \DateTimeImmutable $now): Subscription
+    {
+        $em = $this->doctrine->getManager();
+        $existing = $this->getActiveSubscription($user);
+        if ($existing !== null) {
+            $this->expire($existing, $now);
+        }
+
+        $trialEnd = $now->modify('+' . $this->catalog->trialDays() . ' days');
+        $sub = new Subscription(
+            user: $user,
+            plan: Plan::Pro,
+            status: SubscriptionStatus::Trialing,
+            currentPeriodStart: $now,
+            currentPeriodEnd: $trialEnd,
+        );
+        $sub->setTrialEndsAt($trialEnd);
+
+        $em->persist($sub);
+        $em->flush();
+
+        $this->logger->info('Admin force-trial granted', [
+            'user_id' => $user->getId()->toRfc4122(),
+            'until' => $trialEnd->format('c'),
+        ]);
+
+        return $sub;
+    }
+
+    /**
+     * Админский force-Pro: подарить N дней Pro без оплаты.
+     * externalSubscriptionId остаётся null (это не реальная подписка
+     * у платёжного провайдера). Существующая usable-подписка
+     * предварительно гасится в expired.
+     */
+    public function forceActivatePro(
+        User $user,
+        int $days,
+        \DateTimeImmutable $now,
+    ): Subscription {
+        if ($days < 1) {
+            throw new \InvalidArgumentException('days must be >= 1');
+        }
+        $em = $this->doctrine->getManager();
+        $existing = $this->getActiveSubscription($user);
+        if ($existing !== null) {
+            $this->expire($existing, $now);
+        }
+
+        $periodEnd = $now->modify('+' . $days . ' days');
+        $sub = new Subscription(
+            user: $user,
+            plan: Plan::Pro,
+            status: SubscriptionStatus::Active,
+            currentPeriodStart: $now,
+            currentPeriodEnd: $periodEnd,
+        );
+
+        $em->persist($sub);
+        $em->flush();
+
+        $this->logger->info('Admin force-Pro granted', [
+            'user_id' => $user->getId()->toRfc4122(),
+            'days' => $days,
+            'until' => $periodEnd->format('c'),
+        ]);
+
+        return $sub;
+    }
+
     public function cancel(Subscription $subscription, \DateTimeImmutable $now): void
     {
         $subscription->setStatus(SubscriptionStatus::Cancelled);

@@ -68,6 +68,14 @@ class Subscription
     #[ORM\Column(name: 'notification_expired_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $notificationExpiredSentAt = null;
 
+    /**
+     * Момент перехода триал → Pro (заполняется в activatePro,
+     * если до этого подписка была trialing). Нужно для метрики
+     * конверсии в /admin stats.
+     */
+    #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $convertedFromTrialAt = null;
+
     public function __construct(
         User $user,
         Plan $plan,
@@ -214,6 +222,18 @@ class Subscription
     public function setNotificationExpiredSentAt(?\DateTimeImmutable $at): self
     {
         $this->notificationExpiredSentAt = $at;
+
+        return $this;
+    }
+
+    public function getConvertedFromTrialAt(): ?\DateTimeImmutable
+    {
+        return $this->convertedFromTrialAt;
+    }
+
+    public function setConvertedFromTrialAt(?\DateTimeImmutable $at): self
+    {
+        $this->convertedFromTrialAt = $at;
 
         return $this;
     }

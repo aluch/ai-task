@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Telegram\Handler\AccessRequestCallbackHandler;
+use App\Telegram\Handler\AdminCallbackHandler;
 use App\Telegram\Handler\AdminHandler;
 use App\Telegram\Handler\BlockHandler;
 use App\Telegram\Handler\ConfirmationCallbackHandler;
@@ -58,6 +59,7 @@ class HandlerRegistry
         private readonly SubscriptionHandler $subscriptionHandler,
         private readonly SubscriptionCallbackHandler $subscriptionCallbackHandler,
         private readonly AdminHandler $adminHandler,
+        private readonly AdminCallbackHandler $adminCallbackHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
         private readonly TelegramUserResolver $userResolver,
@@ -131,6 +133,7 @@ class HandlerRegistry
         $bot->onCallbackQueryData('access:{data}', $this->accessCallbackHandler);
         $bot->onCallbackQueryData('upgrade:{data}', $this->upgradeCallbackHandler);
         $bot->onCallbackQueryData('subscription:{data}', $this->subscriptionCallbackHandler);
+        $bot->onCallbackQueryData('admin:{data}', $this->adminCallbackHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;

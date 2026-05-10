@@ -20,8 +20,10 @@ use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
 use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
+use App\Service\Subscription\SubscriptionStatsService;
 use App\Service\Subscription\TrialNotifier;
 use App\Service\Subscription\UsageTracker;
+use App\Telegram\UI\AdminStatsMessageBuilder;
 use App\Telegram\UI\SoftBlockMessageBuilder;
 use App\Telegram\UI\SubscriptionMessageBuilder;
 use App\Telegram\UI\UpgradeMessageBuilder;
@@ -70,6 +72,8 @@ final class ScenarioRunner
         private readonly SoftBlockMessageBuilder $softBlock,
         private readonly UpgradeMessageBuilder $upgradeBuilder,
         private readonly SubscriptionMessageBuilder $subBuilder,
+        private readonly SubscriptionStatsService $statsService,
+        private readonly AdminStatsMessageBuilder $statsBuilder,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -137,6 +141,9 @@ final class ScenarioRunner
             's3-upgrade-pay-shows-stub-message' => fn () => $this->s3UpgradePayShowsStub(),
             's3-subscription-shows-trial-status' => fn () => $this->s3SubscriptionShowsTrial(),
             's3-subscription-cancel-flow' => fn () => $this->s3SubscriptionCancelFlow(),
+            's3-admin-grant-trial-creates-subscription' => fn () => $this->s3AdminGrantTrial(),
+            's3-admin-grant-pro-creates-active-subscription' => fn () => $this->s3AdminGrantPro(),
+            's3-admin-stats-shows-counts' => fn () => $this->s3AdminStats(),
         ];
     }
 
@@ -2002,6 +2009,89 @@ final class ScenarioRunner
         $payload = $this->subBuilder->buildForCancelled($u, $fresh, $now);
         if (!str_contains($payload['text'], 'отменена')) {
             return ScenarioResult::fail($name, 0, 'cancelled-экран без слова «отменена»');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3AdminGrantTrial(): ScenarioResult
+    {
+        $name = 's3-admin-grant-trial-creates-subscription';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020005', 'S3GrantTrial');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+
+        $sub = $this->subscriptions->forceStartTrial($u, $now);
+        if ($sub->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail($name, 0, "после forceStartTrial статус {$sub->getStatus()->value}");
+        }
+        $active = $this->subscriptions->getActiveSubscription($u);
+        if ($active === null || $active->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail($name, 0, 'getActiveSubscription не вернул свежий триал');
+        }
+        // Повторный grant — старый должен погаснуть, новый стать активным.
+        $sub2 = $this->subscriptions->forceStartTrial($u, $now->modify('+1 hour'));
+        if ($sub2->getId()->equals($sub->getId())) {
+            return ScenarioResult::fail($name, 0, 'повторный forceStartTrial вернул ту же подписку (должен создать новую)');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3AdminGrantPro(): ScenarioResult
+    {
+        $name = 's3-admin-grant-pro-creates-active-subscription';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000020006', 'S3GrantPro');
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $sub = $this->subscriptions->forceActivatePro($u, 30, $now);
+        if ($sub->getStatus() !== SubscriptionStatus::Active) {
+            return ScenarioResult::fail($name, 0, "статус {$sub->getStatus()->value}, ожидался active");
+        }
+        $expectedEnd = $now->modify('+30 days');
+        if ($sub->getCurrentPeriodEnd()->format('Y-m-d') !== $expectedEnd->format('Y-m-d')) {
+            return ScenarioResult::fail($name, 0, 'currentPeriodEnd != now+30d');
+        }
+        if ($sub->getExternalSubscriptionId() !== null) {
+            return ScenarioResult::fail($name, 0, 'externalSubscriptionId должен быть null (админский грант, без оплаты)');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s3AdminStats(): ScenarioResult
+    {
+        $name = 's3-admin-stats-shows-counts';
+        $this->purgeAllSubscriptions();
+        // Создаём набор: 1 trial, 1 active, 1 expired через force-методы.
+        $now = new \DateTimeImmutable('2026-05-01 12:00:00 UTC');
+        $uT = $this->ensureCleanSubUser('2000020007', 'S3StatsTrial');
+        $this->subscriptions->forceStartTrial($uT, $now);
+        $uA = $this->ensureCleanSubUser('2000020008', 'S3StatsActive');
+        $this->subscriptions->forceActivatePro($uA, 30, $now);
+        $uE = $this->ensureCleanSubUser('2000020009', 'S3StatsExpired');
+        $expSub = $this->subscriptions->forceStartTrial($uE, $now);
+        $this->subscriptions->expire($expSub, $now);
+
+        $data = $this->statsService->collect($now);
+        if ($data['subscriptions']['trialing'] < 1) {
+            return ScenarioResult::fail($name, 0, "trialing count = {$data['subscriptions']['trialing']}, ожидался ≥1");
+        }
+        if ($data['subscriptions']['active'] < 1) {
+            return ScenarioResult::fail($name, 0, "active count = {$data['subscriptions']['active']}, ожидался ≥1");
+        }
+        if ($data['subscriptions']['expired'] < 1) {
+            return ScenarioResult::fail($name, 0, "expired count = {$data['subscriptions']['expired']}, ожидался ≥1");
+        }
+        $text = $this->statsBuilder->build($data);
+        if (!str_contains($text, '📊 Статистика подписок')) {
+            return ScenarioResult::fail($name, 0, 'нет заголовка «Статистика подписок»');
+        }
+        if (!str_contains($text, 'MRR')) {
+            return ScenarioResult::fail($name, 0, 'нет MRR в выводе');
+        }
+        if (!str_contains($text, 'Конвертация триал → Pro')) {
+            return ScenarioResult::fail($name, 0, 'нет строки конверсии');
         }
 
         return ScenarioResult::pass($name, 0);
