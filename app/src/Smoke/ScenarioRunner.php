@@ -18,6 +18,7 @@ use App\Entity\Subscription;
 use App\Entity\UsageCounter;
 use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
+use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
 use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
 use App\Service\Subscription\SubscriptionStatsService;
@@ -74,6 +75,7 @@ final class ScenarioRunner
         private readonly SubscriptionMessageBuilder $subBuilder,
         private readonly SubscriptionStatsService $statsService,
         private readonly AdminStatsMessageBuilder $statsBuilder,
+        private readonly InvoicePayloadBuilder $invoiceBuilder,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -144,6 +146,8 @@ final class ScenarioRunner
             's3-admin-grant-trial-creates-subscription' => fn () => $this->s3AdminGrantTrial(),
             's3-admin-grant-pro-creates-active-subscription' => fn () => $this->s3AdminGrantPro(),
             's3-admin-stats-shows-counts' => fn () => $this->s3AdminStats(),
+            // S4: Telegram Payments + ЮKassa
+            's4-upgrade-shows-pay-button' => fn () => $this->s4UpgradeShowsPayButton(),
         ];
     }
 
@@ -1940,10 +1944,13 @@ final class ScenarioRunner
 
     private function s3UpgradePayShowsStub(): ScenarioResult
     {
+        // S3 проверял что клик «Оплатить» отвечает заглушкой. В S4 стаб
+        // остаётся только как fallback на «провайдер не сконфигурирован»;
+        // проверяем что текст про это всё ещё доступен в builder'е.
         $name = 's3-upgrade-pay-shows-stub-message';
         $stub = $this->upgradeBuilder->buildPayStub();
-        if (!str_contains($stub, 'Оплата') || !str_contains($stub, 'скоро')) {
-            return ScenarioResult::fail($name, 0, 'stub оплаты не содержит ожидаемый текст');
+        if (!str_contains($stub, 'Платежи') || !str_contains($stub, 'не сконфигурированы')) {
+            return ScenarioResult::fail($name, 0, 'fallback-stub не содержит ожидаемый текст');
         }
 
         return ScenarioResult::pass($name, 0);
@@ -2096,6 +2103,30 @@ final class ScenarioRunner
 
         return ScenarioResult::pass($name, 0);
     }
+
+    // ────────────────────────────── S4 ──────────────────────────────
+
+    private function s4UpgradeShowsPayButton(): ScenarioResult
+    {
+        $name = 's4-upgrade-shows-pay-button';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030001', 'S4FreePay');
+        $payload = $this->upgradeBuilder->buildForFree($u);
+
+        $cb = array_column($payload['keyboard'][0] ?? [], 'callback_data');
+        if (!in_array('upgrade:pay', $cb, true)) {
+            return ScenarioResult::fail($name, 0, 'нет кнопки upgrade:pay');
+        }
+        // Цена в тексте кнопки — динамически из PlanCatalog.
+        $btnText = $payload['keyboard'][0][0]['text'] ?? '';
+        $price = (int) round($this->invoiceBuilder->getAmountMinor() / 100);
+        if (!str_contains($btnText, (string) $price)) {
+            return ScenarioResult::fail($name, 0, "кнопка не содержит цену {$price}: {$btnText}");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
 
     private function setupFreshAssistant(): User
     {

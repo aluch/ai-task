@@ -14,6 +14,8 @@ parameters:
     anthropic.model_advisor: '%env(ANTHROPIC_MODEL_ADVISOR)%'
     anthropic.model_assistant: '%env(ANTHROPIC_MODEL_ASSISTANT)%'
     redis.url: '%env(REDIS_URL)%'
+    default_yookassa_mode: 'test'
+    default_empty: ''
 
 services:
     # default configuration for services in *this* file
@@ -88,6 +90,20 @@ services:
             $plans: '%subscription.plans%'
             $trialDays: '%subscription.trial_days%'
             $refundWindowDays: '%subscription.refund_window_days%'
+
+    # YooKassa credentials под test/live. Все значения из env, в коде
+    # хардкодов нет. Default 'test' если YOOKASSA_MODE не задан — чтобы
+    # локалка/smoke поднимались без отдельной настройки. Пустые credentials
+    # допустимы (стенд может работать без подключённого провайдера).
+    App\Service\Subscription\Provider\YooKassa\YooKassaConfig:
+        arguments:
+            $mode: '%env(default:default_yookassa_mode:string:YOOKASSA_MODE)%'
+            $testProviderToken: '%env(default:default_empty:string:YOOKASSA_TEST_PROVIDER_TOKEN)%'
+            $liveProviderToken: '%env(default:default_empty:string:YOOKASSA_LIVE_PROVIDER_TOKEN)%'
+            $testShopId: '%env(default:default_empty:string:YOOKASSA_TEST_SHOP_ID)%'
+            $liveShopId: '%env(default:default_empty:string:YOOKASSA_LIVE_SHOP_ID)%'
+            $testSecretKey: '%env(default:default_empty:string:YOOKASSA_TEST_SECRET_KEY)%'
+            $liveSecretKey: '%env(default:default_empty:string:YOOKASSA_LIVE_SECRET_KEY)%'
 
     App\Service\FreeSuggestionStore:
         arguments:

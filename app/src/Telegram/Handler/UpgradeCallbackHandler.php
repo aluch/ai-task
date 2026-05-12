@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace App\Telegram\Handler;
 
+use App\Domain\Subscription\SubscriptionStatus;
 use App\Service\AccessGate;
+use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
+use App\Service\Subscription\Provider\YooKassa\YooKassaConfig;
+use App\Service\Subscription\SubscriptionService;
 use App\Service\TelegramUserResolver;
 use App\Telegram\UI\UpgradeMessageBuilder;
 use Psr\Log\LoggerInterface;
@@ -13,8 +17,8 @@ use SergiX44\Nutgram\Nutgram;
 /**
  * Роутинг для callback'ов upgrade:* — три ветки:
  *   info  — soft-block из S2 ведёт сюда. Открывает полный экран /upgrade.
- *   pay   — заглушка «оплата скоро» (S4 заменит на ЮKassa-инвойс).
- *           Если кликнул админ — показываем админский текст вместо stub'а.
+ *   pay   — отправляет ЮKassa-инвойс через Telegram Payments (S4).
+ *           Если кликнул админ или у юзера уже Pro — отказ.
  *   later — пользователь сказал «не сейчас», убираем клавиатуру.
  */
 class UpgradeCallbackHandler
@@ -24,6 +28,9 @@ class UpgradeCallbackHandler
         private readonly AccessGate $gate,
         private readonly UpgradeHandler $upgradeHandler,
         private readonly UpgradeMessageBuilder $builder,
+        private readonly SubscriptionService $subscriptions,
+        private readonly YooKassaConfig $yooKassa,
+        private readonly InvoicePayloadBuilder $invoice,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -43,9 +50,6 @@ class UpgradeCallbackHandler
     private function handleInfo(Nutgram $bot): void
     {
         $bot->answerCallbackQuery();
-        // Поведение прежнего UpgradeInfoCallbackHandler — открыть экран
-        // /upgrade. Делегируем UpgradeHandler'у — он сам разберётся,
-        // какой текст показать (free / trial / admin).
         ($this->upgradeHandler)($bot);
     }
 
@@ -53,8 +57,7 @@ class UpgradeCallbackHandler
     {
         $user = $this->userResolver->resolve($bot);
 
-        // Если кнопку нажал админ (мог зайти из soft-block test'а) —
-        // показываем админский текст, не stub.
+        // Админ — не платит, безлимит.
         if ($this->gate->isAdmin($user)) {
             $bot->answerCallbackQuery();
             $payload = $this->builder->buildForAdmin($user);
@@ -63,12 +66,55 @@ class UpgradeCallbackHandler
             return;
         }
 
-        $this->logger->info('Upgrade pay clicked (stub)', [
-            'user_id' => $user->getId()->toRfc4122(),
-        ]);
+        // Уже active Pro — не даём купить второй раз. Active важно отличить
+        // от Cancelled-но-ещё-действует и от Trialing: при триале можно
+        // купить (триал погасится в activatePro), при Cancelled тоже —
+        // пользователь, возможно, передумал.
+        $current = $this->subscriptions->getActiveSubscription($user);
+        if ($current !== null && $current->getStatus() === SubscriptionStatus::Active) {
+            $bot->answerCallbackQuery(
+                text: 'У тебя уже Pro — всё ок.',
+                show_alert: true,
+            );
+
+            return;
+        }
+
+        // Платежи не сконфигурированы — admin/dev могут поднять стенд без
+        // настоящих ключей. Не падать в HTTP-ошибку, а ответить честно.
+        if (!$this->yooKassa->isConfigured()) {
+            $this->logger->warning('Pay clicked but YooKassa not configured', [
+                'user_id' => $user->getId()->toRfc4122(),
+                'mode' => $this->yooKassa->getMode(),
+            ]);
+            $bot->answerCallbackQuery();
+            $bot->sendMessage(
+                text: '⚠️ Платежи пока не сконфигурированы на сервере. Попробуй чуть позже или напиши автору.',
+            );
+
+            return;
+        }
+
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $invoicePayload = $this->invoice->buildPayload($user, $now);
 
         $bot->answerCallbackQuery();
-        $bot->sendMessage(text: $this->builder->buildPayStub());
+        $bot->sendInvoice(
+            title: $this->invoice->getInvoiceTitle(),
+            description: $this->invoice->getInvoiceDescription(),
+            payload: $invoicePayload,
+            provider_token: $this->yooKassa->getProviderToken(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            prices: $this->invoice->buildPrices(),
+            start_parameter: 'pomni-pro',
+            provider_data: $this->invoice->buildProviderData(),
+        );
+
+        $this->logger->info('Invoice sent', [
+            'user_id' => $user->getId()->toRfc4122(),
+            'mode' => $this->yooKassa->getMode(),
+            'amount_minor' => $this->invoice->getAmountMinor(),
+        ]);
     }
 
     private function handleLater(Nutgram $bot): void

@@ -116,24 +116,23 @@ final class UpgradeMessageBuilder
         return ['text' => $text, 'keyboard' => $this->payKeyboard($price)];
     }
 
+    public function buildLaterAck(): string
+    {
+        return 'ОК, без проблем. Когда захочешь — /upgrade.';
+    }
+
     /**
-     * Текст-заглушка для кнопки «💳 Оплатить» — S3 пока без реальных
-     * платежей, S4 заменит этот ответ на ЮKassa-инвойс.
+     * Текст-fallback для клика «💳 Оплатить» если YooKassa не сконфигурирована
+     * на сервере (provider_token пуст). В обычных условиях S4 шлёт реальный
+     * invoice через {@see UpgradeCallbackHandler::handlePay}.
      */
     public function buildPayStub(): string
     {
         return <<<'TXT'
-            ⏳ Оплата через Telegram Payments скоро появится.
+            ⚠️ Платежи пока не сконфигурированы на сервере.
 
-            Я уже регистрируюсь в платёжной системе. Когда всё готово — пришлю в этот чат.
-
-            Если очень нужно прямо сейчас — напиши /admin (если ты админ) или дождись обновления.
+            Скорее всего, провайдер ещё подключается. Попробуй чуть позже или напиши автору.
             TXT;
-    }
-
-    public function buildLaterAck(): string
-    {
-        return 'ОК, без проблем. Когда захочешь — /upgrade.';
     }
 
     /**
