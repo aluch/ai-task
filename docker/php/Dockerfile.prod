@@ -61,10 +61,17 @@ WORKDIR /var/www/app
 # Копируем уже-собранный код+vendor из composer-stage. Никаких dev/, tests/.
 COPY --from=composer-stage --chown=1000:1000 /app /var/www/app
 
-# Прокладка для var/cache+var/log — права как у dev-образа,
-# чтобы named volume наследовал uid 1000.
+# Прокладка для var/cache+var/log. В отличие от dev-образа (там uid 1000
+# чтобы bind mount с хоста писался без permission issues), в prod нет bind
+# mount'а — код копируется внутрь образа. Здесь критично, чтобы var/ был
+# писабелен от пользователя, под которым работают php-fpm worker'ы.
+# В php:8.3-fpm-alpine pool по умолчанию идёт под www-data (uid 82). Если
+# оставить 1000:1000 — Doctrine на каждом запросе пытается записать
+# pools/system/.../ParserResult и падает с permission denied (cache живёт
+# в памяти fallback'ом, но это шумные WARNING'и в логах + тормоза).
 RUN mkdir -p /var/www/app/var/cache /var/www/app/var/log \
-    && chown -R 1000:1000 /var/www/app/var
+    && chown -R www-data:www-data /var/www/app/var \
+    && chmod -R u+rw,g+rw /var/www/app/var
 
 # Symfony Dotenv::bootEnv() требует существование .env. app/.env закоммичен
 # в .gitignore (см. f445829), поэтому в build-context файла нет — без stub'а
@@ -97,10 +104,15 @@ EOF
 
 # Прогрев opcache preload и Symfony cache при сборке (быстрый первый запрос).
 # APP_ENV=prod APP_DEBUG=0 — иначе не сгенерится prod-кэш.
+# cache:warmup идёт от root (по умолчанию USER в образе), поэтому файлы
+# создаются root:root — после warmup'а переприсваиваем их www-data, чтобы
+# runtime php-fpm worker'ы могли дописывать (lazy cache от Doctrine ORM
+# query parser, validator metadata и т.п.).
 ENV APP_ENV=prod APP_DEBUG=0
 RUN php bin/console cache:clear --env=prod --no-warmup \
     && php bin/console cache:warmup --env=prod \
-    && chown -R 1000:1000 /var/www/app/var
+    && chown -R www-data:www-data /var/www/app/var \
+    && chmod -R u+rw,g+rw /var/www/app/var
 
 EXPOSE 9000
 
