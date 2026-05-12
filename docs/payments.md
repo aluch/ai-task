@@ -86,6 +86,20 @@ Telegram ограничивает `invoice_payload` 128 байтами. Поэт
 - **Дубль callback'а** (Telegram retry) → второй `successful_payment` с тем же `provider_payment_charge_id` фиксируется как `idempotentSkip`, юзеру отвечаем «уже обработано».
 - **Триал → платёж** → `activatePro` фиксирует `convertedFromTrialAt` (метрика конверсии для `/admin stats`).
 
+## Гарантия что Telegram присылает pre_checkout_query
+
+По умолчанию Telegram **не шлёт** `pre_checkout_query` и `successful_payment` в webhook — даже если у бота зарегистрированы соответствующие handler'ы. Без явного списка `allowed_updates` Telegram присылает только `message` и `callback_query`. Если `pre_checkout_query` не дойдёт до нас за 10 секунд, Telegram молча таймаутит платёж с `BOT_PRECHECKOUT_TIMEOUT` — у пользователя списания не происходит, у нас в логах ничего.
+
+Источник истины — `bin/set-webhook.sh`, там в `setWebhook`-запросе зашит минимальный набор:
+
+```
+allowed_updates: ["message", "edited_message", "callback_query", "pre_checkout_query", "shipping_query"]
+```
+
+`bin/deploy.sh` дёргает `bin/set-webhook.sh` при каждом деплое, поэтому любой ручной фикс через Telegram API будет перезаписан на следующем rollout'е. Если меняешь webhook URL или добавляешь новый тип update'а — правь именно этот скрипт, не через API.
+
+`shipping_query` оставлен «на всякий случай» — мы пока не запрашиваем доставку (`is_flexible=false` по умолчанию), но если в будущем добавим need_shipping_address, тип уже будет в списке.
+
 ## Безопасность
 
 - `provider_token` / `secret_key` — никогда в логи. Логируется только `payment_id`, `external_id`, `amount_minor`, `user_id` (UUID).

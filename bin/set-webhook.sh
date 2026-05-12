@@ -28,9 +28,15 @@ fi
 
 echo "Setting webhook to: ${URL}"
 
+# allowed_updates: важно держать pre_checkout_query и shipping_query —
+# без них Telegram Payments молча таймаутит платёж (BOT_PRECHECKOUT_TIMEOUT).
+# По умолчанию Telegram не шлёт эти типы в webhook, даже если у бота есть
+# onPreCheckoutQuery handler. Этот список перезаписывается при каждом
+# деплое через bin/deploy.sh — ручной фикс через API не переживёт следующий
+# rollout, источник истины тут.
 curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
     -H "Content-Type: application/json" \
-    -d "$(printf '{"url":"%s","secret_token":"%s","drop_pending_updates":true,"allowed_updates":["message","callback_query"]}' \
+    -d "$(printf '{"url":"%s","secret_token":"%s","drop_pending_updates":true,"allowed_updates":["message","edited_message","callback_query","pre_checkout_query","shipping_query"]}' \
         "$URL" "$TELEGRAM_WEBHOOK_SECRET")"
 echo
 echo "✅ Webhook set"
