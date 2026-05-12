@@ -9,6 +9,7 @@ use App\Domain\Subscription\SubscriptionStatus;
 use App\Entity\Subscription;
 use App\Entity\User;
 use App\Service\PlanCatalog;
+use App\Service\Subscription\Provider\YooKassa\YooKassaConfig;
 
 /**
  * Тексты + клавиатуры для /upgrade. Четыре варианта по статусу
@@ -23,6 +24,7 @@ final class UpgradeMessageBuilder
 {
     public function __construct(
         private readonly PlanCatalog $catalog,
+        private readonly YooKassaConfig $yooKassa,
     ) {
     }
 
@@ -87,6 +89,8 @@ final class UpgradeMessageBuilder
             ✓ Личная поддержка от автора
             TXT;
 
+        $text .= $this->testModeFooter();
+
         return ['text' => $text, 'keyboard' => $this->payKeyboard($price)];
     }
 
@@ -112,6 +116,8 @@ final class UpgradeMessageBuilder
 
             Цена: ₽{$price}/мес (~\$5.40)
             TXT;
+
+        $text .= $this->testModeFooter();
 
         return ['text' => $text, 'keyboard' => $this->payKeyboard($price)];
     }
@@ -165,5 +171,19 @@ final class UpgradeMessageBuilder
         $rubles = (int) round($this->catalog->priceRubMinor(Plan::Pro) / 100);
 
         return number_format($rubles, 0, '.', ' ');
+    }
+
+    /**
+     * В test-режиме добавляем строку про тестовую карту — защита от
+     * того что мы сами забудем что стенд не live. В live-режиме —
+     * пустая строка.
+     */
+    private function testModeFooter(): string
+    {
+        if (!$this->yooKassa->isTestMode()) {
+            return '';
+        }
+
+        return "\n\nTest mode — реальная сумма не спишется. Используй тестовую карту 5555 5555 5555 4444.";
     }
 }

@@ -288,7 +288,7 @@ bot:
   - `block_task` / `unblock_task` — с проверкой циклов.
   - `suggest_tasks` — вызов TaskAdvisor (аналог /free, но только текст без кнопок).
 
-  После любых изменений в Ассистенте или tools — `make smoke-all` (полный suite — 63 сценария на 2026-05-10). В `smoke:all` есть `sleep(8)` между assistant-сценариями, чтобы не упираться в 30k TPM Anthropic rate-limit.
+  После любых изменений в Ассистенте или tools — `make smoke-all` (полный suite — 71 сценарий на 2026-05-12). В `smoke:all` есть `sleep(8)` между assistant-сценариями, чтобы не упираться в 30k TPM Anthropic rate-limit.
 - `App\AI\DTO\ClaudeResponse` — DTO ответа Claude API.
 - `App\AI\DTO\ParsedTaskDTO` — DTO разобранной задачи (title, description, deadline, priority, contextCodes, parserNotes).
 - `App\AI\DTO\TaskSuggestionDTO` + `SuggestedTask` — DTO подборки задач (suggestions, reasoning, totalEstimatedMinutes, noMatchReason).
@@ -322,9 +322,9 @@ Haiku выбрана для парсинга: достаточно умна дл
 
 ## Smoke-тесты
 
-`make smoke-all` прогоняет полный suite сценариев (63 на 2026-05-10:
+`make smoke-all` прогоняет полный suite сценариев (71 на 2026-05-12:
 reminder-пайплайн, ассистент с tool calling, whitelist, scheduler heartbeat,
-S1 подписки, S2 интеграция в UX, S3 user/admin команды). Reminder-сценарии не дёргают Telegram
+S1 подписки, S2 интеграция в UX, S3 user/admin команды, S4 платежи). Reminder-сценарии не дёргают Telegram
 API (используется `InMemoryTelegramNotifier`) и Anthropic; ассистент-
 сценарии бьют в реальный Anthropic. Время — фиксируется через `FrozenClock`.
 **После любых изменений в ReminderSender, handler'ах, правилах quiet
@@ -374,7 +374,7 @@ Health: `App\Controller\HealthController` (`GET /health`) — проверяет
 
 GitHub Actions workflow `.github/workflows/deploy.yml` — push в `main` (и `workflow_dispatch` для ручных перевыкаток) запускает `bin/deploy.sh` на VPS через SSH. После деплоя — 60-секундный poll `https://${DOMAIN}/health` (12 попыток × 5s), если не отвечает 200 — `exit 1`, CI помечает failure. Уведомление в Telegram через отдельного бота (`TG_NOTIFY_BOT_TOKEN`). `concurrency: deploy-prod` + `cancel-in-progress` гарантирует один деплой за раз. Подробно — `docs/ci-cd.md` (включая список GitHub Secrets и troubleshooting).
 
-## Подписки и биллинг (S1+S2+S3)
+## Подписки и биллинг (S1+S2+S3+S4)
 
 Plan-aware архитектура: `App\Domain\Subscription\Plan` (Free/Pro), `SubscriptionStatus` (trialing/active/past_due/cancelled/expired), `PaymentStatus`. Все суммы в копейках (`amountMinor: int`).
 
@@ -391,6 +391,11 @@ Plan-aware архитектура: `App\Domain\Subscription\Plan` (Free/Pro), `S
 - `App\Service\Subscription\TrialNotifier` — cron-уведомления о приближении и факте конца триала (3 дня / 1 день / истёк). Дедуп через `notification_*_sent_at`. Quiet hours соблюдаются для предупреждений, для «истёк» — нет.
 - `App\Service\Subscription\SubscriptionExpirer` — переводит истёкшие usable-подписки в `expired` через `SubscriptionService::expire`.
 - `App\Service\Subscription\SubscriptionStatsService` (S3) — собирает числа для `/admin stats`: пользователи (total/allowed/admins), подписки по статусам, MRR (active × цена Pro из конфига), активность за 7 дней (новые регистрации, стартованные триалы, конверсии, отмены). Ad-hoc COUNT-запросы, без хранилища метрик.
+- `App\Service\Subscription\Provider\YooKassa\YooKassaConfig` (S4) — credentials для test/live через YOOKASSA_MODE. Fail-fast в конструкторе, `isConfigured()` для проверки provider_token.
+- `App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder` (S4) — payload (≤128 байт, лимит Telegram) + provider_data.receipt (54-ФЗ, vat_code=1 «Без НДС» для самозанятого) + цена через PlanCatalog.
+- `App\Service\Subscription\Provider\YooKassa\PaymentValidator` (S4) — валидация pre_checkout_query: совпадение user_id/amount, currency=RUB, нет уже-active Pro.
+- `App\Service\Subscription\Provider\YooKassa\PaymentProcessor` (S4) — идемпотентная обработка successful_payment: findOneBy(externalPaymentId) → если есть, no-op + `idempotentSkip=true`; иначе создаёт Payment + вызывает `activatePro`.
+- `App\Service\Subscription\AdminPaymentNotifier` (S4) — Telegram-сообщение админу о новом платеже. В test-режиме no-op (защита от спама при тестировании).
 
 Telegram-интеграция:
 - `App\Telegram\UI\WelcomeMessageBuilder` — три варианта приветствия (`buildWithTrial` / `buildStandard` / `buildForAdmin`). Текст изолирован, чтобы перевод не трогал handler.
@@ -400,17 +405,22 @@ Telegram-интеграция:
 - `App\Telegram\UI\AdminStatsMessageBuilder` (S3) — рендеринг статистики для `/admin stats`.
 - `App\Telegram\Handler\StartHandler` — на первом `/start` авто-стартует триал не-админам, показывает welcome с 🎁 если стартанул.
 - `App\Telegram\Handler\AssistantHandler` / `App\Telegram\Handler\FreeHandler` — `canPerformAction` ДО AI-вызова → soft block если false; `recordAction` ТОЛЬКО после успешного AI-вызова (на ошибке Anthropic лимит не тратится).
-- `App\Telegram\Handler\UpgradeHandler` + `UpgradeCallbackHandler` (S3) — `/upgrade` + callbacks `upgrade:info|pay|later`. Кнопка «Оплатить» пока заглушка («Оплата через Telegram Payments скоро появится»), S4 заменит на инвойс. `UpgradeInfoCallbackHandler` (S2) удалён.
+- `App\Telegram\Handler\UpgradeHandler` + `UpgradeCallbackHandler` (S3+S4) — `/upgrade` + callbacks `upgrade:info|pay|later`. С S4 `pay` шлёт реальный ЮKassa-инвойс через `$bot->sendInvoice` (если provider_token сконфигурирован); admin/active Pro отбиваются alert'ом; для unconfigured — fallback-stub.
 - `App\Telegram\Handler\SubscriptionHandler` + `SubscriptionCallbackHandler` (S3) — `/subscription` + двухшаговая отмена через callbacks `subscription:cancel`, `subscription:cancel:confirm|abort`.
+- `App\Telegram\Handler\PreCheckoutQueryHandler` (S4) — `onPreCheckoutQuery`, делегирует валидацию в `PaymentValidator`, отвечает `answerPreCheckoutQuery(ok, error_message)`.
+- `App\Telegram\Handler\SuccessfulPaymentHandler` (S4) — `onSuccessfulPayment`, прокидывает в `PaymentProcessor`. Идемпотентен (повторный callback → «уже обработано»). В live-режиме пингует админа.
 - `App\Telegram\Handler\AdminHandler` (S3 расширен) — подкоманды `grant_trial <tg_id>`, `grant_pro <tg_id> <days>`, `revoke_subscription <tg_id>`, `stats`. Confirm-flow через `AdminCallbackHandler` (callbacks `admin:grant_trial:<tg_id>:confirm|abort` и т.д.).
+- `App\Telegram\UI\UpgradeMessageBuilder` (S3+S4) — тексты `/upgrade` для четырёх статусов; в test-режиме `YOOKASSA_MODE=test` добавляет строку про тестовую карту в pitch (защита от того, что мы сами забудем что стенд не live).
 
 Cron (через `ReminderSchedule`, каждые 5 минут):
 - `NotifyTrialEndingMessage` → `NotifyTrialEndingHandler` → `TrialNotifier::tick`.
 - `ExpireSubscriptionsMessage` → `ExpireSubscriptionsHandler` → `SubscriptionExpirer::tick`.
 
-Backfill: миграция `Version20260510000000` выдаёт триал всем существующим `is_allowed=true` не-админам (идемпотентна — повторный прогон не дублирует). Миграция `Version20260514000000` добавляет `subscriptions.converted_from_trial_at`.
+Backfill: миграция `Version20260510000000` выдаёт триал всем существующим `is_allowed=true` не-админам (идемпотентна — повторный прогон не дублирует). Миграция `Version20260514000000` добавляет `subscriptions.converted_from_trial_at`. Миграция `Version20260516000000` — partial UNIQUE-индекс по `payments.external_payment_id` (идемпотентность платежей на уровне БД).
 
-Что НЕ сделано (этапы далее): Telegram Payments (S4), auto-rebill (S5), реальный refund через ЮKassa Refund API (S6). Подробно — `docs/subscriptions.md`.
+Env (S4): `YOOKASSA_MODE` (test/live), `YOOKASSA_TEST/LIVE_PROVIDER_TOKEN`, `YOOKASSA_TEST/LIVE_SHOP_ID`, `YOOKASSA_TEST/LIVE_SECRET_KEY`. Secret key пока не используется в коде (только provider_token идёт в Telegram), прописан заранее для S5/S6. Дефолт `test`, пустые credentials допустимы (стенд без подключённого провайдера). Подробный поток — `docs/payments.md`.
+
+Что НЕ сделано (этапы далее): auto-rebill (S5 — webhook от ЮKassa, recurring через external_subscription_id, email-уведомления), реальный refund через ЮKassa Refund API (S6). Подробно — `docs/subscriptions.md` и `docs/payments.md`.
 
 ## Backups & Monitoring
 

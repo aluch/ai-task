@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Telegram\Handler;
 
 use App\Entity\User;
+use App\Service\Subscription\AdminPaymentNotifier;
 use App\Service\Subscription\Provider\YooKassa\PaymentProcessor;
+use App\Service\Subscription\Provider\YooKassa\YooKassaConfig;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
 use SergiX44\Nutgram\Nutgram;
@@ -24,6 +26,8 @@ class SuccessfulPaymentHandler
     public function __construct(
         private readonly PaymentProcessor $processor,
         private readonly ManagerRegistry $doctrine,
+        private readonly YooKassaConfig $yooKassa,
+        private readonly AdminPaymentNotifier $adminNotifier,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -91,5 +95,11 @@ class SuccessfulPaymentHandler
                 . "Теперь у тебя 1500 действий в месяц без ограничений.\n\n"
                 . 'Статус: /subscription',
         );
+
+        // Уведомить админа о новой оплате — только в live. В test —
+        // спамил бы при каждом тестировании, не нужно.
+        if (!$this->yooKassa->isTestMode()) {
+            $this->adminNotifier->notifyPaid($user, $result->payment);
+        }
     }
 }
