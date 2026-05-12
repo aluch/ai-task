@@ -88,6 +88,13 @@ class Payment
         return $this->currency;
     }
 
+    public function setCurrency(string $currency): self
+    {
+        $this->currency = $currency;
+
+        return $this;
+    }
+
     public function getStatus(): PaymentStatus
     {
         return $this->status;

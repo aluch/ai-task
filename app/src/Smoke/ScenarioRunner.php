@@ -18,7 +18,10 @@ use App\Entity\Subscription;
 use App\Entity\UsageCounter;
 use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
+use App\Entity\Payment;
 use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
+use App\Service\Subscription\Provider\YooKassa\PaymentProcessor;
+use App\Service\Subscription\Provider\YooKassa\PaymentValidator;
 use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
 use App\Service\Subscription\SubscriptionStatsService;
@@ -76,6 +79,8 @@ final class ScenarioRunner
         private readonly SubscriptionStatsService $statsService,
         private readonly AdminStatsMessageBuilder $statsBuilder,
         private readonly InvoicePayloadBuilder $invoiceBuilder,
+        private readonly PaymentValidator $paymentValidator,
+        private readonly PaymentProcessor $paymentProcessor,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -148,6 +153,13 @@ final class ScenarioRunner
             's3-admin-stats-shows-counts' => fn () => $this->s3AdminStats(),
             // S4: Telegram Payments + ЮKassa
             's4-upgrade-shows-pay-button' => fn () => $this->s4UpgradeShowsPayButton(),
+            's4-precheckout-valid-payload' => fn () => $this->s4PrecheckoutValidPayload(),
+            's4-precheckout-amount-mismatch' => fn () => $this->s4PrecheckoutAmountMismatch(),
+            's4-precheckout-user-mismatch' => fn () => $this->s4PrecheckoutUserMismatch(),
+            's4-precheckout-user-already-pro' => fn () => $this->s4PrecheckoutUserAlreadyPro(),
+            's4-successful-payment-creates-subscription' => fn () => $this->s4SuccessfulPaymentCreatesSubscription(),
+            's4-successful-payment-idempotent' => fn () => $this->s4SuccessfulPaymentIdempotent(),
+            's4-successful-payment-on-trial-replaces-with-active' => fn () => $this->s4SuccessfulPaymentOnTrialReplacesWithActive(),
         ];
     }
 
@@ -2127,6 +2139,269 @@ final class ScenarioRunner
         return ScenarioResult::pass($name, 0);
     }
 
+    private function s4PrecheckoutValidPayload(): ScenarioResult
+    {
+        $name = 's4-precheckout-valid-payload';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030002', 'S4PreOK');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $payload = $this->invoiceBuilder->buildPayload($u, $now);
+        $error = $this->paymentValidator->validatePreCheckout(
+            invoicePayloadJson: $payload,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            user: $u,
+        );
+        if ($error !== null) {
+            return ScenarioResult::fail($name, 0, "ожидался ok, получили reject: {$error}");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4PrecheckoutAmountMismatch(): ScenarioResult
+    {
+        $name = 's4-precheckout-amount-mismatch';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030003', 'S4PreAmt');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $payload = $this->invoiceBuilder->buildPayload($u, $now);
+        // Симулируем что юзер каким-то образом подменил сумму на стороне
+        // клиента: total_amount = 45000, payload остался 49000.
+        $error = $this->paymentValidator->validatePreCheckout(
+            invoicePayloadJson: $payload,
+            totalAmount: 45000,
+            currency: InvoicePayloadBuilder::CURRENCY,
+            user: $u,
+        );
+        if ($error === null) {
+            return ScenarioResult::fail($name, 0, 'ожидался reject при несовпадении суммы');
+        }
+        if (!str_contains($error, 'Сумма')) {
+            return ScenarioResult::fail($name, 0, "ожидался reject «Сумма…», получили: {$error}");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4PrecheckoutUserMismatch(): ScenarioResult
+    {
+        $name = 's4-precheckout-user-mismatch';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030004', 'S4PreUserA');
+        $other = $this->ensureCleanSubUser('2000030005', 'S4PreUserB');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        // Перечитаем $u из текущего EM (ensureCleanSubUser делает $em->clear).
+        $em = $this->doctrine->getManager();
+        $repo = $em->getRepository(User::class);
+        $u = $repo->findOneBy(['telegramId' => '2000030004']);
+        $other = $repo->findOneBy(['telegramId' => '2000030005']);
+        if ($u === null || $other === null) {
+            return ScenarioResult::fail($name, 0, 'не нашли юзеров после ensureCleanSubUser');
+        }
+
+        // Payload собран на $other, а pre_checkout прилетает от $u — должно быть отбито.
+        $payload = $this->invoiceBuilder->buildPayload($other, $now);
+        $error = $this->paymentValidator->validatePreCheckout(
+            invoicePayloadJson: $payload,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            user: $u,
+        );
+        if ($error === null) {
+            return ScenarioResult::fail($name, 0, 'ожидался reject при чужом user_id');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4PrecheckoutUserAlreadyPro(): ScenarioResult
+    {
+        $name = 's4-precheckout-user-already-pro';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030006', 'S4PreAlreadyPro');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+
+        $payload = $this->invoiceBuilder->buildPayload($u, $now);
+        $error = $this->paymentValidator->validatePreCheckout(
+            invoicePayloadJson: $payload,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            user: $u,
+        );
+        if ($error === null) {
+            return ScenarioResult::fail($name, 0, 'ожидался reject — юзер уже Pro');
+        }
+        if (!str_contains($error, 'Pro')) {
+            return ScenarioResult::fail($name, 0, "ожидался reject «уже Pro», получили: {$error}");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4SuccessfulPaymentCreatesSubscription(): ScenarioResult
+    {
+        $name = 's4-successful-payment-creates-subscription';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030007', 'S4Pay');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $payload = $this->invoiceBuilder->buildPayload($u, $now);
+        $result = $this->paymentProcessor->process(
+            user: $u,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            invoicePayloadJson: $payload,
+            providerPaymentChargeId: 'test-charge-' . uniqid(),
+            telegramPaymentChargeId: 'tg-charge-' . uniqid(),
+            now: $now,
+        );
+
+        if ($result->idempotentSkip) {
+            return ScenarioResult::fail($name, 0, 'первый process() пометил как idempotent — не должен');
+        }
+        if ($result->subscription === null) {
+            return ScenarioResult::fail($name, 0, 'подписка не создана');
+        }
+        if ($result->subscription->getStatus() !== SubscriptionStatus::Active) {
+            return ScenarioResult::fail($name, 0, "статус {$result->subscription->getStatus()->value}, ожидался active");
+        }
+        if ($result->payment->getStatus() !== \App\Domain\Subscription\PaymentStatus::Succeeded) {
+            return ScenarioResult::fail($name, 0, 'Payment не в Succeeded');
+        }
+
+        // Перепроверяем по БД — должен быть один Payment.
+        $em = $this->doctrine->getManager();
+        $count = (int) $em->getRepository(Payment::class)
+            ->createQueryBuilder('p')
+            ->select('COUNT(p.id)')
+            ->andWhere('p.user = :u')
+            ->setParameter('u', $u)
+            ->getQuery()
+            ->getSingleScalarResult();
+        if ($count !== 1) {
+            return ScenarioResult::fail($name, 0, "в БД {$count} payment'ов, ожидался 1");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4SuccessfulPaymentIdempotent(): ScenarioResult
+    {
+        $name = 's4-successful-payment-idempotent';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030008', 'S4Idem');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $payload = $this->invoiceBuilder->buildPayload($u, $now);
+        $externalId = 'test-charge-idem-' . uniqid();
+
+        $first = $this->paymentProcessor->process(
+            user: $u,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            invoicePayloadJson: $payload,
+            providerPaymentChargeId: $externalId,
+            telegramPaymentChargeId: 'tg-1',
+            now: $now,
+        );
+        if ($first->idempotentSkip) {
+            return ScenarioResult::fail($name, 0, 'первый process() уже idempotent — не должен');
+        }
+
+        $second = $this->paymentProcessor->process(
+            user: $u,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            invoicePayloadJson: $payload,
+            providerPaymentChargeId: $externalId,
+            telegramPaymentChargeId: 'tg-2',
+            now: $now->modify('+1 minute'),
+        );
+        if (!$second->idempotentSkip) {
+            return ScenarioResult::fail($name, 0, 'дубликат external_payment_id не отловлен');
+        }
+        if (!$second->payment->getId()->equals($first->payment->getId())) {
+            return ScenarioResult::fail($name, 0, 'дубликат вернул другой payment_id');
+        }
+
+        // В БД — ровно один Payment.
+        $em = $this->doctrine->getManager();
+        $count = (int) $em->getRepository(Payment::class)
+            ->createQueryBuilder('p')
+            ->select('COUNT(p.id)')
+            ->andWhere('p.externalPaymentId = :e')
+            ->setParameter('e', $externalId)
+            ->getQuery()
+            ->getSingleScalarResult();
+        if ($count !== 1) {
+            return ScenarioResult::fail($name, 0, "в БД {$count} payment'ов с external_id, ожидался 1");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s4SuccessfulPaymentOnTrialReplacesWithActive(): ScenarioResult
+    {
+        $name = 's4-successful-payment-on-trial-replaces-with-active';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000030009', 'S4TrialToPro');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        // Юзер на триале.
+        $this->subscriptions->startTrial($u, $now);
+        $trialSub = $this->subscriptions->getActiveSubscription($u);
+        if ($trialSub?->getStatus() !== SubscriptionStatus::Trialing) {
+            return ScenarioResult::fail($name, 0, 'preconditions: триал не стартовал');
+        }
+        $trialId = $trialSub->getId();
+
+        // Платит — переходит на active.
+        $payment = new \DateTimeImmutable('2026-05-13 10:00:00 UTC');
+        $payload = $this->invoiceBuilder->buildPayload($u, $payment);
+        $result = $this->paymentProcessor->process(
+            user: $u,
+            totalAmount: $this->invoiceBuilder->getAmountMinor(),
+            currency: InvoicePayloadBuilder::CURRENCY,
+            invoicePayloadJson: $payload,
+            providerPaymentChargeId: 'test-charge-trial-' . uniqid(),
+            telegramPaymentChargeId: 'tg-trial',
+            now: $payment,
+        );
+
+        $active = $this->subscriptions->getActiveSubscription($u);
+        if ($active === null) {
+            return ScenarioResult::fail($name, 0, 'после оплаты нет активной подписки');
+        }
+        if ($active->getStatus() !== SubscriptionStatus::Active) {
+            return ScenarioResult::fail($name, 0, "статус {$active->getStatus()->value}, ожидался active");
+        }
+        // Та же подписка (activatePro модифицирует существующую), не новая.
+        if (!$active->getId()->equals($trialId)) {
+            return ScenarioResult::fail($name, 0, 'activatePro создал новую подписку вместо смены существующей');
+        }
+        // current_period_end сдвинулся к +30 дней от платежа.
+        $expectedEnd = $payment->modify('+30 days');
+        if ($active->getCurrentPeriodEnd()->format('Y-m-d') !== $expectedEnd->format('Y-m-d')) {
+            return ScenarioResult::fail($name, 0, 'current_period_end не сдвинулся к now+30d');
+        }
+        // convertedFromTrialAt проставлен (см. S3).
+        if ($active->getConvertedFromTrialAt() === null) {
+            return ScenarioResult::fail($name, 0, 'convertedFromTrialAt не записан');
+        }
+
+        // S3 tracking smoke лишь подтверждает что заявка снаряжена; здесь —
+        // что её именно платёж и активирует.
+        if (!$result->payment->getSubscription()?->getId()->equals($active->getId())) {
+            return ScenarioResult::fail($name, 0, 'Payment.subscription не указывает на active');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
 
     private function setupFreshAssistant(): User
     {

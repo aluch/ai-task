@@ -16,10 +16,12 @@ use App\Telegram\Handler\AssistantHandler;
 use App\Telegram\Handler\FreeCallbackHandler;
 use App\Telegram\Handler\FreeHandler;
 use App\Telegram\Handler\ListCallbackHandler;
+use App\Telegram\Handler\PreCheckoutQueryHandler;
 use App\Telegram\Handler\ReminderCallbackHandler;
 use App\Telegram\Handler\ResetHandler;
 use App\Telegram\Handler\SubscriptionCallbackHandler;
 use App\Telegram\Handler\SubscriptionHandler;
+use App\Telegram\Handler\SuccessfulPaymentHandler;
 use App\Telegram\Handler\TaskActionCallbackHandler;
 use App\Telegram\Handler\HelpHandler;
 use App\Telegram\Handler\ListHandler;
@@ -60,6 +62,8 @@ class HandlerRegistry
         private readonly SubscriptionCallbackHandler $subscriptionCallbackHandler,
         private readonly AdminHandler $adminHandler,
         private readonly AdminCallbackHandler $adminCallbackHandler,
+        private readonly PreCheckoutQueryHandler $preCheckoutHandler,
+        private readonly SuccessfulPaymentHandler $successfulPaymentHandler,
         private readonly ListCallbackHandler $listCallbackHandler,
         private readonly ReminderCallbackHandler $reminderCallbackHandler,
         private readonly TelegramUserResolver $userResolver,
@@ -134,6 +138,10 @@ class HandlerRegistry
         $bot->onCallbackQueryData('upgrade:{data}', $this->upgradeCallbackHandler);
         $bot->onCallbackQueryData('subscription:{data}', $this->subscriptionCallbackHandler);
         $bot->onCallbackQueryData('admin:{data}', $this->adminCallbackHandler);
+
+        // Payments (S4): Telegram Payments + ЮKassa.
+        $bot->onPreCheckoutQuery($this->preCheckoutHandler);
+        $bot->onSuccessfulPayment($this->successfulPaymentHandler);
 
         // Свободный текст идёт в Assistant (tool calling + история диалога).
         $assistantHandler = $this->assistantHandler;
