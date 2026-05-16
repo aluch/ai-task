@@ -132,4 +132,29 @@ final class InvoicePayloadBuilder
     {
         return '1500 действий в месяц, поддержка автора, все будущие интеграции.';
     }
+
+    /**
+     * Минимальный provider_data только для save_payment_method=true (S5).
+     * НЕ содержит receipt — самозанятый формирует чеки 54-ФЗ через
+     * «Мой налог» сам (см. {@see buildProviderData} с объяснением).
+     *
+     * payment_method_data.type=bank_card нужен ЮKassa чтобы понять что
+     * мы хотим сохранить именно карту (не SBP). save_payment_method=true —
+     * флаг сохранить токен карты на стороне ЮKassa. capture=true — сразу
+     * списать (не двухстадийный hold).
+     *
+     * После такого invoice'а ЮKassa в ответе payment.payment_method.saved=true
+     * + payment_method.id — этот id мы достаём через {@see YooKassaApiClient::getPayment}
+     * и сохраняем в Subscription::savedPaymentMethodId.
+     */
+    public function buildProviderDataForRecurring(): string
+    {
+        $data = [
+            'payment_method_data' => ['type' => 'bank_card'],
+            'save_payment_method' => true,
+            'capture' => true,
+        ];
+
+        return json_encode($data, \JSON_THROW_ON_ERROR);
+    }
 }

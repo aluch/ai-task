@@ -99,11 +99,12 @@ class UpgradeCallbackHandler
         $invoicePayload = $this->invoice->buildPayload($user, $now);
 
         $bot->answerCallbackQuery();
-        // provider_data НЕ передаём: для самозанятого ЮKassa не выступает
-        // фискальным агентом — чеки 54-ФЗ владелец кабинета формирует сам
-        // через «Мой налог». Если же передать receipt без customer.email/
-        // phone, ЮKassa молча отклоняет invoice ещё до этапа списания, и
-        // пользователь видит «Заплатить не получилось». См. InvoicePayloadBuilder::buildProviderData.
+        // provider_data: только save_payment_method=true (без receipt-блока).
+        // Receipt не передаём — самозанятый формирует чеки 54-ФЗ через «Мой
+        // налог» сам (S4 fix). save_payment_method=true — нужно для S5
+        // recurring: ЮKassa сохраняет карту и возвращает payment_method.id
+        // в payload payment'а, который мы потом дёргаем через
+        // YooKassaApiClient::getPayment и пишем в Subscription.
         $bot->sendInvoice(
             title: $this->invoice->getInvoiceTitle(),
             description: $this->invoice->getInvoiceDescription(),
@@ -112,6 +113,7 @@ class UpgradeCallbackHandler
             currency: InvoicePayloadBuilder::CURRENCY,
             prices: $this->invoice->buildPrices(),
             start_parameter: 'pomni-pro',
+            provider_data: $this->invoice->buildProviderDataForRecurring(),
         );
 
         $this->logger->info('Invoice sent', [

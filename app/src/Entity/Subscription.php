@@ -76,6 +76,42 @@ class Subscription
     #[ORM\Column(type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $convertedFromTrialAt = null;
 
+    /**
+     * Токен карты от ЮKassa (payment_method.id), сохранённый после
+     * первого успешного платежа через save_payment_method=true.
+     * Используется для recurring-списаний. NULL у админских grant'ов и
+     * платежей до S5 (или если save_payment_method не прошёл).
+     */
+    #[ORM\Column(type: 'string', length: 64, nullable: true)]
+    private ?string $savedPaymentMethodId = null;
+
+    /**
+     * Включено ли автопродление. По умолчанию true, пользователь может
+     * отключить через /subscription. У триалов/cancelled значения не имеет.
+     * False означает «доступ до currentPeriodEnd, дальше Free».
+     */
+    #[ORM\Column(type: 'boolean', options: ['default' => true])]
+    private bool $autoRebillEnabled = true;
+
+    /**
+     * Дедуп уведомления «через 24 часа спишется». Заполняется в
+     * RebillScheduler при отправке.
+     *
+     * name: явно — иначе UnderscoreNamingStrategy не вставит подчёркивание
+     * между буквой и цифрой (см. notification_3d_sent_at для аналогичного
+     * случая в S2).
+     */
+    #[ORM\Column(name: 'notification_24h_before_rebill_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notification24hBeforeRebillSentAt = null;
+
+    /**
+     * Сколько подряд неудачных rebill-attempt'ов было после последнего
+     * успеха. Сбрасывается на 0 при успешном списании. После 3 — подписка
+     * идёт на expire через RebillScheduler.
+     */
+    #[ORM\Column(type: 'smallint', options: ['default' => 0])]
+    private int $rebillFailedAttempts = 0;
+
     public function __construct(
         User $user,
         Plan $plan,
@@ -234,6 +270,54 @@ class Subscription
     public function setConvertedFromTrialAt(?\DateTimeImmutable $at): self
     {
         $this->convertedFromTrialAt = $at;
+
+        return $this;
+    }
+
+    public function getSavedPaymentMethodId(): ?string
+    {
+        return $this->savedPaymentMethodId;
+    }
+
+    public function setSavedPaymentMethodId(?string $id): self
+    {
+        $this->savedPaymentMethodId = $id;
+
+        return $this;
+    }
+
+    public function isAutoRebillEnabled(): bool
+    {
+        return $this->autoRebillEnabled;
+    }
+
+    public function setAutoRebillEnabled(bool $enabled): self
+    {
+        $this->autoRebillEnabled = $enabled;
+
+        return $this;
+    }
+
+    public function getNotification24hBeforeRebillSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notification24hBeforeRebillSentAt;
+    }
+
+    public function setNotification24hBeforeRebillSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notification24hBeforeRebillSentAt = $at;
+
+        return $this;
+    }
+
+    public function getRebillFailedAttempts(): int
+    {
+        return $this->rebillFailedAttempts;
+    }
+
+    public function setRebillFailedAttempts(int $n): self
+    {
+        $this->rebillFailedAttempts = $n;
 
         return $this;
     }
