@@ -13,6 +13,7 @@ use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
 use App\Service\Subscription\Provider\YooKassa\YooKassaApiClient;
 use App\Service\Subscription\Provider\YooKassa\YooKassaApiException;
 use App\Service\Subscription\Provider\YooKassa\YooKassaConfig;
+use App\Service\Subscription\RenewalNotifier;
 use App\Service\Subscription\SubscriptionService;
 use Doctrine\Persistence\ManagerRegistry;
 use Psr\Log\LoggerInterface;
@@ -55,6 +56,7 @@ class RebillScheduler
         private readonly YooKassaConfig $config,
         private readonly InvoicePayloadBuilder $invoice,
         private readonly TelegramNotifierInterface $notifier,
+        private readonly RenewalNotifier $renewalNotifier,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -63,15 +65,14 @@ class RebillScheduler
     {
         // Auto-rebill отключён — TG Payments не передаёт save_payment_method
         // в ЮKassa. Старые методы (notifyUpcomingCharges, initiateCharges,
-        // retryFailedAttempts, expirePastDueSubscriptions) — dead code,
-        // их вызов выключен. См. docs/payments.md «Почему нет auto-rebill».
+        // retryFailedAttempts, expirePastDueSubscriptions) — dead code.
         //
-        // run() остаётся точкой входа для cron (TriggerRebillMessage). В
-        // следующем коммите S5-revert сюда придут новые методы для ручного
-        // renewal-цикла (notify за 3 дня / 1 день / expired).
-        $this->logger->info('RebillScheduler tick (no-op: auto-rebill disabled)', [
+        // Сейчас single responsibility: запустить RenewalNotifier — три
+        // прохода для ручного renewal (3д/1д/expired). См. docs/payments.md.
+        $this->logger->info('RebillScheduler tick (manual renewal mode)', [
             'now' => $now->format(\DateTimeInterface::ATOM),
         ]);
+        $this->renewalNotifier->tick($now);
     }
 
     /**

@@ -22,6 +22,7 @@ use App\Entity\Payment;
 use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
 use App\Service\Subscription\Provider\YooKassa\PaymentProcessor;
 use App\Service\Subscription\Provider\YooKassa\PaymentValidator;
+use App\Service\Subscription\RenewalNotifier;
 use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
 use App\Service\Subscription\SubscriptionStatsService;
@@ -81,6 +82,7 @@ final class ScenarioRunner
         private readonly InvoicePayloadBuilder $invoiceBuilder,
         private readonly PaymentValidator $paymentValidator,
         private readonly PaymentProcessor $paymentProcessor,
+        private readonly RenewalNotifier $renewalNotifier,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -160,9 +162,13 @@ final class ScenarioRunner
             's4-successful-payment-creates-subscription' => fn () => $this->s4SuccessfulPaymentCreatesSubscription(),
             's4-successful-payment-idempotent' => fn () => $this->s4SuccessfulPaymentIdempotent(),
             's4-successful-payment-on-trial-replaces-with-active' => fn () => $this->s4SuccessfulPaymentOnTrialReplacesWithActive(),
-            // S5: auto-rebill откатан (TG Payments save_payment_method не работает).
-            // Подписки продляются вручную через /upgrade. См. docs/payments.md.
-            // Smoke-сценарии добавляются в следующем коммите.
+            // S5 (revert): manual renewal через /upgrade — auto-rebill отменён.
+            // Подписка истекает сама через SubscriptionExpirer; RenewalNotifier
+            // шлёт уведомления за 3 дня, 1 день и в момент истечения.
+            's5-no-rebill-3d-notification' => fn () => $this->s5NoRebill3dNotification(),
+            's5-no-rebill-1d-notification' => fn () => $this->s5NoRebill1dNotification(),
+            's5-no-rebill-expired-message' => fn () => $this->s5NoRebillExpiredMessage(),
+            's5-subscription-renew-button-redirects-to-upgrade' => fn () => $this->s5SubscriptionRenewButtonRedirectsToUpgrade(),
         ];
     }
 
@@ -2406,6 +2412,164 @@ final class ScenarioRunner
         return ScenarioResult::pass($name, 0);
     }
 
+    // ────────────────────────────── S5 (revert / manual renewal) ──────────────────────────────
+
+    private function s5NoRebill3dNotification(): ScenarioResult
+    {
+        $name = 's5-no-rebill-3d-notification';
+        $this->purgeAllSubscriptions();
+        $this->harness->notifier()->clear();
+        $u = $this->ensureCleanSubUser('2000040001', 'S5Renewal3d');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $em = $this->doctrine->getManager();
+        // Active paid Pro c period_end через 65 часов — попадает в окно
+        // 60-72h. trial_ends_at IS NULL — это не триал.
+        $sub = new Subscription(
+            user: $u,
+            plan: Plan::Pro,
+            status: SubscriptionStatus::Active,
+            currentPeriodStart: $now->modify('-25 days'),
+            currentPeriodEnd: $now->modify('+65 hours'),
+        );
+        $em->persist($sub);
+        $em->flush();
+
+        $sent = $this->renewalNotifier->notifyThreeDaysBefore($now);
+        if ($sent !== 1) {
+            return ScenarioResult::fail($name, 0, "ожидалось 1 уведомление, отправлено {$sent}");
+        }
+
+        $em->clear();
+        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
+        if ($fresh?->getNotification3dRenewalSentAt() === null) {
+            return ScenarioResult::fail($name, 0, 'флаг notification_3d_renewal не проставлен');
+        }
+        $msg = $this->harness->notifier()->getMessages()[0] ?? null;
+        if ($msg === null || !str_contains($msg['text'], 'Через 3 дня')) {
+            return ScenarioResult::fail($name, 0, 'текст не содержит «Через 3 дня»');
+        }
+        if (!str_contains($msg['text'], '/upgrade')) {
+            return ScenarioResult::fail($name, 0, 'текст не содержит /upgrade');
+        }
+
+        // Повторный tick не должен дублировать.
+        $secondTick = $this->renewalNotifier->notifyThreeDaysBefore($now->modify('+10 minutes'));
+        if ($secondTick !== 0) {
+            return ScenarioResult::fail($name, 0, "повторный tick отправил {$secondTick} (ожидался 0)");
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s5NoRebill1dNotification(): ScenarioResult
+    {
+        $name = 's5-no-rebill-1d-notification';
+        $this->purgeAllSubscriptions();
+        $this->harness->notifier()->clear();
+        $u = $this->ensureCleanSubUser('2000040002', 'S5Renewal1d');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $em = $this->doctrine->getManager();
+        $sub = new Subscription(
+            user: $u,
+            plan: Plan::Pro,
+            status: SubscriptionStatus::Active,
+            currentPeriodStart: $now->modify('-29 days'),
+            currentPeriodEnd: $now->modify('+18 hours'),
+        );
+        $em->persist($sub);
+        $em->flush();
+
+        $sent = $this->renewalNotifier->notifyOneDayBefore($now);
+        if ($sent !== 1) {
+            return ScenarioResult::fail($name, 0, "ожидалось 1 уведомление, отправлено {$sent}");
+        }
+        $em->clear();
+        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
+        if ($fresh?->getNotification1dRenewalSentAt() === null) {
+            return ScenarioResult::fail($name, 0, 'флаг notification_1d_renewal не проставлен');
+        }
+        $msg = $this->harness->notifier()->getMessages()[0] ?? null;
+        if ($msg === null || !str_contains($msg['text'], 'Завтра закончится')) {
+            return ScenarioResult::fail($name, 0, 'текст не содержит «Завтра закончится»');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s5NoRebillExpiredMessage(): ScenarioResult
+    {
+        $name = 's5-no-rebill-expired-message';
+        $this->purgeAllSubscriptions();
+        $this->harness->notifier()->clear();
+        $u = $this->ensureCleanSubUser('2000040003', 'S5RenewalExp');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+
+        $em = $this->doctrine->getManager();
+        // Active Pro c уже истёкшим period_end — RenewalNotifier должен
+        // перевести в Expired и уведомить.
+        $sub = new Subscription(
+            user: $u,
+            plan: Plan::Pro,
+            status: SubscriptionStatus::Active,
+            currentPeriodStart: $now->modify('-31 days'),
+            currentPeriodEnd: $now->modify('-1 hour'),
+        );
+        $em->persist($sub);
+        $em->flush();
+
+        $sent = $this->renewalNotifier->notifyExpiredAndExpire($now);
+        if ($sent !== 1) {
+            return ScenarioResult::fail($name, 0, "ожидалось 1 уведомление, отправлено {$sent}");
+        }
+
+        $em->clear();
+        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
+        if ($fresh?->getStatus() !== SubscriptionStatus::Expired) {
+            return ScenarioResult::fail($name, 0, 'статус не переведён в Expired');
+        }
+        if ($fresh?->getNotificationExpiredSentAt() === null) {
+            return ScenarioResult::fail($name, 0, 'notification_expired_sent_at не заполнен');
+        }
+        $msg = $this->harness->notifier()->getMessages()[0] ?? null;
+        if ($msg === null || !str_contains($msg['text'], 'Подписка Pro закончилась')) {
+            return ScenarioResult::fail($name, 0, 'текст не содержит «Подписка Pro закончилась»');
+        }
+        if (!str_contains($msg['text'], 'Free')) {
+            return ScenarioResult::fail($name, 0, 'текст не упоминает Free');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
+
+    private function s5SubscriptionRenewButtonRedirectsToUpgrade(): ScenarioResult
+    {
+        // UpgradeCallbackHandler::sendRenewalInvoice — public-метод
+        // который обходит «уже active Pro» guard. Smoke проверяет
+        // что метод существует и SubscriptionMessageBuilder для active
+        // Pro отдаёт правильный callback subscription:renew.
+        $name = 's5-subscription-renew-button-redirects-to-upgrade';
+        $this->purgeAllSubscriptions();
+        $u = $this->ensureCleanSubUser('2000040004', 'S5Renew');
+        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
+        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
+        $sub = $this->subscriptions->getActiveSubscription($u);
+        if ($sub === null) {
+            return ScenarioResult::fail($name, 0, 'preconditions: подписка не создана');
+        }
+
+        $payload = $this->subBuilder->buildForActivePro($u, $sub, $now);
+        $cb = $payload['keyboard'][0][0]['callback_data'] ?? null;
+        if ($cb !== 'subscription:renew') {
+            return ScenarioResult::fail($name, 0, "ожидался subscription:renew, получен {$cb}");
+        }
+        if (!method_exists(\App\Telegram\Handler\UpgradeCallbackHandler::class, 'sendRenewalInvoice')) {
+            return ScenarioResult::fail($name, 0, 'UpgradeCallbackHandler::sendRenewalInvoice не существует');
+        }
+
+        return ScenarioResult::pass($name, 0);
+    }
 
     private function setupFreshAssistant(): User
     {

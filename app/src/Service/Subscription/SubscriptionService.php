@@ -95,6 +95,14 @@ class SubscriptionService
             if ($wasTrial && $sub->getConvertedFromTrialAt() === null) {
                 $sub->setConvertedFromTrialAt($now);
             }
+            // Сбрасываем renewal-notification флаги для нового цикла —
+            // даже если предыдущий цикл уже отметился, новый период
+            // начинается с чистого листа. notification_expired_sent_at
+            // переиспользуется между триалом и paid Pro, поэтому тоже
+            // обнуляем (иначе после триала Pro-renewal-expire не сработает).
+            $sub->setNotification3dRenewalSentAt(null);
+            $sub->setNotification1dRenewalSentAt(null);
+            $sub->setNotificationExpiredSentAt(null);
         }
         if ($externalSubscriptionId !== null) {
             $sub->setExternalSubscriptionId($externalSubscriptionId);

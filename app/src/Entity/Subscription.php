@@ -124,6 +124,24 @@ class Subscription
     #[ORM\Column(type: 'smallint', options: ['default' => 0])]
     private int $rebillFailedAttempts = 0;
 
+    /**
+     * Дедуп уведомления «через 3 дня закончится Pro» (paid renewal).
+     * Заполняется RebillScheduler::notifyThreeDaysBeforeExpiry.
+     * Не путать с triальным notification_3d_sent_at (привязан к
+     * trialEndsAt) — здесь привязка к currentPeriodEnd платной подписки.
+     *
+     * name: явно — UnderscoreNamingStrategy ломается на «3d» (digit
+     * пограничен с буквой).
+     */
+    #[ORM\Column(name: 'notification_3d_renewal_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notification3dRenewalSentAt = null;
+
+    /**
+     * Дедуп уведомления «завтра закончится Pro» (paid renewal).
+     */
+    #[ORM\Column(name: 'notification_1d_renewal_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $notification1dRenewalSentAt = null;
+
     public function __construct(
         User $user,
         Plan $plan,
@@ -330,6 +348,30 @@ class Subscription
     public function setRebillFailedAttempts(int $n): self
     {
         $this->rebillFailedAttempts = $n;
+
+        return $this;
+    }
+
+    public function getNotification3dRenewalSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notification3dRenewalSentAt;
+    }
+
+    public function setNotification3dRenewalSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notification3dRenewalSentAt = $at;
+
+        return $this;
+    }
+
+    public function getNotification1dRenewalSentAt(): ?\DateTimeImmutable
+    {
+        return $this->notification1dRenewalSentAt;
+    }
+
+    public function setNotification1dRenewalSentAt(?\DateTimeImmutable $at): self
+    {
+        $this->notification1dRenewalSentAt = $at;
 
         return $this;
     }
