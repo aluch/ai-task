@@ -206,24 +206,40 @@ Callback `subscription:cancel` — двухшаговый flow:
 - Миграция `Version20260516000000` — partial UNIQUE по `payments.external_payment_id` (идемпотентность на уровне БД).
 - 8 smoke-сценариев `s4-*`.
 
-## Что сделано в S5
+## Что было сделано в S5 — и почему откачено
 
-Auto-rebill — подписка сама продлевается через сохранённый токен карты, без действия пользователя. Подробно — `docs/subscriptions-recurring.md` (UX-стейты, callback-карта, failed-flow) и `docs/payments.md` § Recurring billing (архитектура, идемпотентность, webhook).
+Изначально S5 = auto-rebill: подписка автоматически продлевается через сохранённый токен карты. На проде выяснилось: Telegram Payments не пробрасывает `save_payment_method=true` в ЮKassa, `payment_method.saved=false`. Без сохранённой карты recurring невозможен.
 
-Кратко по компонентам:
+Откат (`revert(recurring): disable auto-rebill`):
+- `RebillScheduler::run` больше не дёргает API ЮKassa, четыре старых метода помечены DEAD CODE.
+- `PaymentProcessor` больше не пытается записать `savedPaymentMethodId` (это всегда был NULL).
+- UI отмены подписки (`subscription:cancel:*`, `subscription:disable_rebill:*`, `subscription:enable_rebill`) удалён.
+- Все 9 smoke `s5-*` удалены — тестировали недостижимое.
 
-- `Subscription.savedPaymentMethodId / autoRebillEnabled / rebillFailedAttempts / notification24hBeforeRebillSentAt` — новые поля.
-- `RecurringAttempt` — журнал попыток списания (UUID, idempotenceKey, status, error_*).
-- `YooKassaApiClient` — REST к https://api.yookassa.ru/v3, Basic-auth shopId/secretKey, `Idempotence-Key` header.
-- `YooKassaIpAllowlist` — IP-фильтр для входящего webhook'а.
-- `RebillScheduler` (cron каждые 15 минут) — 4 фазы: notify-24h, initiate, retry, expire.
-- `RebillWebhookProcessor` — обработка `payment.succeeded` / `payment.canceled` с идемпотентностью.
-- `YooKassaWebhookController` — POST `/api/yookassa/webhook`, всегда 200.
-- UI: hard-cancel из S3 убран, заменён на `subscription:disable_rebill` (мягкая отмена через флаг).
-- 9 smoke-сценариев `s5-*`.
+Оставлено как dead code на случай возврата (если Telegram добавит поддержку):
+- Все S5-поля в `subscriptions` с `DEAD CODE` docblock'ами.
+- Таблица `recurring_attempts` + сущность.
+- `YooKassaApiClient::createRecurringPayment / removePaymentMethod`.
+- `YooKassaWebhookController` + `RebillWebhookProcessor` + `YooKassaIpAllowlist` (webhook пригодится для S6 refunds).
+
+Подробно — `docs/payments.md` § Почему нет auto-rebill.
+
+## Manual renewal (вместо S5 recurring)
+
+Подписка продлевается **только через явный `/upgrade`**. За 3 дня и 1 день до истечения шлём напоминания, в момент истечения — уведомление о переходе на Free и `status=expired`.
+
+- `Subscription.notification_3d_renewal_sent_at / _1d_renewal_sent_at` — новые поля для дедупа (миграция `Version20260525000000`).
+- `Subscription.notification_expired_sent_at` — переиспользуется из S2 (обнуляется в `activatePro` для нового цикла).
+- `App\Service\Subscription\RenewalNotifier` — три прохода: 3д, 1д, expired.
+- `RebillScheduler::run` теперь дёргает `RenewalNotifier::tick` (cron каждые 15 минут).
+- UI: для active Pro кнопка «💎 Продлить сейчас» → callback `subscription:renew` → `UpgradeCallbackHandler::sendRenewalInvoice` (bypass'ит «уже active Pro» guard).
+- 4 smoke `s5-no-rebill-*` + обновлён `s3-subscription-cancel-flow`.
+
+Подробное руководство по UX-стейтам — `docs/subscriptions-recurring.md`.
 
 ## Что НЕ сделано (этапы дальше)
 
 | Этап | Что добавляется |
 |---|---|
 | S6 | Реальный refund через ЮKassa Refund API + admin stats по refund'ам |
+| ??? | Возврат к auto-rebill — когда TG Payments начнёт пробрасывать save_payment_method, или переход на ЮKassa Checkout / Telegram Stars |

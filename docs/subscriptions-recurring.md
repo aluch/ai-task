@@ -1,113 +1,85 @@
-# Auto-rebill: UX-стейты и сценарии (S5)
+# Renewal flow without recurring
 
-Подробное руководство по `auto_rebill_enabled` flow. Низкоуровневую архитектуру (классы, идемпотентность, IP allowlist) смотри в `docs/payments.md` § Recurring billing.
+Pro-подписка продлевается **только вручную** через `/upgrade`. Auto-rebill откатан (см. `docs/payments.md` § Почему нет auto-rebill). Этот документ — про UX-стейты и сценарии уведомлений.
 
-## Состояния подписки
+## Жизненный цикл подписки
 
-Видно пользователю в `/subscription`. Каждое состояние — отдельный билдер в `SubscriptionMessageBuilder`.
+```
+Day 0:    user → /upgrade → оплата → Subscription(status=active, period_end=now+30d)
+Day 27:   RenewalNotifier → «⏰ Через 3 дня закончится Pro» + /upgrade
+Day 29:   RenewalNotifier → «⏰ Завтра закончится Pro» + /upgrade
+Day 30+:  RenewalNotifier → «🔚 Подписка Pro закончилась» + expire (status=expired)
+Day 30+:  user → /upgrade → новый платёж → Subscription(period_end=now+30d)
+                                              ↑
+                                  notification_*_renewal_sent_at обнулены
+```
 
-### 1. Active + auto_rebill_enabled=true
+В отличие от ситуации с auto-rebill, ничего не списывается без явного действия пользователя.
 
-«Я плачу за Pro и хочу продолжать автоматически». Это умолчательное состояние сразу после оплаты.
+## Уведомления
+
+Реализованы в `App\Service\Subscription\RenewalNotifier`. Запускается из `RebillScheduler` каждые 15 минут (cron через `ReminderSchedule` → `TriggerRebillMessage` → `TriggerRebillHandler` → `RebillScheduler::run`).
+
+| Trigger | Окно от `currentPeriodEnd` | Дедупликатор | Quiet hours | Текст |
+|---|---|---|---|---|
+| `notifyThreeDaysBefore` | `now+60h..now+72h` | `notification_3d_renewal_sent_at` | да | «⏰ Через 3 дня закончится Pro» |
+| `notifyOneDayBefore` | `now+12h..now+24h` | `notification_1d_renewal_sent_at` | да | «⏰ Завтра закончится Pro» |
+| `notifyExpiredAndExpire` | `currentPeriodEnd < now` | `notification_expired_sent_at` | нет | «🔚 Подписка Pro закончилась» + перевод в Expired |
+
+Окна шире 15-минутного шага scheduler'а (60-72h, 12-24h), чтобы переживать пропуск тика. Дубль защищён `_sent_at`-флагом.
+
+### Quiet hours
+
+Для 3д/1д соблюдаются: если попадаем в ночь — пропускаем тик, на следующем 15-минутном проходе попробуем снова. Для expired — нет: свершившийся факт, ночью или нет, перевести надо.
+
+### Фильтр «не трогать триал»
+
+Триалы обрабатываются `TrialNotifier` со своими полями (`notification_3d_sent_at` / `_1d_sent_at` привязаны к `trialEndsAt`). `RenewalNotifier` фильтрует по `plan=Pro AND trial_ends_at IS NULL` — кросс-уведомления невозможны.
+
+### Переиспользование `notification_expired_sent_at`
+
+Это поле было в S2 для триальных expired-уведомлений. После отката S5 переиспользуется для paid-Pro renewal. Чтобы цикл «trial → Pro → expired Pro» сработал корректно, `SubscriptionService::activatePro` обнуляет три renewal-флага (`notification_3d_renewal_sent_at`, `notification_1d_renewal_sent_at`, `notification_expired_sent_at`) при переводе подписки в Active.
+
+## UI: /subscription для active Pro
 
 ```
 💎 Pro
 
 Статус: активна
-Следующее списание: 11.06.2026 — 490 ₽
+Истекает: 11.06.2026 (через 27 дней)
 Использовано в этом месяце: 47 / 1500
 
-[❌ Отключить автопродление]
+[💎 Продлить сейчас]
 ```
 
-Сценарии:
+Кнопка «💎 Продлить сейчас» → callback `subscription:renew` → `SubscriptionCallbackHandler::handleRenew` → `UpgradeCallbackHandler::sendRenewalInvoice(bot, user)`.
 
-- За **24 часа до** `current_period_end` — приходит уведомление «⏰ Завтра спишется 490 ₽» с кнопкой «Отключить автопродление» (= `subscription:disable_rebill`). Дедуп через `notification_24h_before_rebill_sent_at`.
-- За **час до** `current_period_end` — `RebillScheduler.initiateCharges` создаёт `RecurringAttempt` и шлёт POST в ЮKassa.
-- При успехе (webhook `payment.succeeded`) — `current_period_end += 30 дней`, новый цикл, флаг уведомления сбрасывается.
+`sendRenewalInvoice` отличается от обычного `handlePay` тем что **bypass'ит** проверку «уже active Pro» — это явное намерение продлить досрочно. После успешной оплаты `SuccessfulPaymentHandler` → `PaymentProcessor::process` → `SubscriptionService::activatePro` сдвигает `currentPeriodEnd` и обнуляет renewal-флаги для нового цикла.
 
-### 2. Active + auto_rebill_enabled=false
+Если пользователь продлевает за день до истечения, новый период всё равно отсчитывается от `now`, а не от старого `currentPeriodEnd`. Это потеря ~1 дня для пользователя, но проще логически и не требует «остатков». Рассмотрим суммирование если кто-то пожалуется.
 
-«Я хочу доступ до конца оплаченного периода, дальше — Free». Получается после нажатия «Отключить автопродление».
+## UI: /subscription для других стейтов
 
-```
-💎 Pro (автопродление отключено)
+- **Trial** — без изменений, как в S3. `TrialNotifier` шлёт 3д/1д/expired через свои поля.
+- **Cancelled** — UI остался, на практике не используется (hard-cancel удалён в commit 1, status=Cancelled может возникнуть только через прямой вызов `SubscriptionService::cancel`).
+- **Free / Expired** — кнопка «💎 Узнать про Pro» → `/upgrade`.
 
-Действует до: 11.06.2026
-Дальше — Free, если не возобновишь.
+## Что НЕ происходит
 
-Использовано: 47 / 1500
+- ❌ Автоматическое списание перед истечением.
+- ❌ Уведомление «завтра спишется 490 ₽» (теперь «завтра закончится»).
+- ❌ Попытки retry'ев списания.
+- ❌ Перевод в `past_due`.
 
-[✅ Возобновить автопродление]
-[💎 Оплатить ещё месяц]
-```
+Webhook endpoint `/api/yookassa/webhook` и связанная инфраструктура (`RebillWebhookProcessor`, `RecurringAttempt`, `YooKassaApiClient::createRecurringPayment`) — на месте как dead code. Webhook может пригодиться в S6 для refund-уведомлений от ЮKassa.
 
-Сценарии:
+## Когда вернётся auto-rebill
 
-- `RebillScheduler` **не** трогает эту подписку — ни уведомлением, ни списанием.
-- В момент `current_period_end` существующий `SubscriptionExpirer::tick` переведёт в `expired`.
-- Кнопка «Возобновить» → `subscription:enable_rebill` → `auto_rebill_enabled=true`. Без confirm — действие безвредное.
-- Кнопка «Оплатить ещё месяц» → переход на `/upgrade`, делает новый платёж со стандартным flow.
+Когда Telegram Payments начнёт пробрасывать `save_payment_method` в ЮKassa, или мы перейдём на ЮKassa Checkout / Telegram Stars. См. `docs/payments.md`.
 
-### 3. Active с rebill_failed_attempts > 0 (past_due-state)
+## Smoke
 
-Реальный статус всё ещё `Active`, но scheduler уже зафиксировал одну или две неудачные попытки. Пользователю в UI это видно только если он сам открыл `/subscription` — мы не делаем отдельный экран, но пишем личным сообщением:
-
-```
-⚠️ Не удалось списать 490 ₽ за продление Pro.
-Попробуем ещё раз через 24 часа. Проверь карту: возможно недостаточно средств или истёк срок.
-```
-
-При 3-й неудаче:
-
-```
-❌ Не смогли списать 490 ₽ — три попытки подряд.
-Подписка закроется через 24 часа. /upgrade чтобы сменить карту.
-```
-
-Через 24 часа после 3-й неудачи `expirePastDueSubscriptions` переводит в `Expired` и шлёт «🔚 Подписка Pro закрыта».
-
-### 4. Trial / Free / Cancelled
-
-Без изменений из S3. У триала `auto_rebill_enabled` хранится, но значения не имеет — recurring запускается только в `Active`.
-
-## Callback-карта
-
-| callback_data | действие |
-|---|---|
-| `subscription:disable_rebill` | Показать confirm-экран |
-| `subscription:disable_rebill:confirm` | `auto_rebill_enabled=false`, остаётся active до конца периода |
-| `subscription:disable_rebill:abort` | Возврат на /subscription без изменений |
-| `subscription:enable_rebill` | `auto_rebill_enabled=true` (без confirm — безвредное) |
-
-Старые `subscription:cancel:*` из S3 (hard-cancel в `Cancelled`) удалены — disable_rebill даёт ту же семантику пользователю «доступ до конца, дальше Free» более очевидно.
-
-## Failed payments flow
-
-1. **Попытка 1** (за час до period_end): `RecurringAttempt(attempt=1, status=pending)` → POST в ЮKassa.
-   - Webhook `payment.succeeded` → продление + сброс `rebillFailedAttempts=0`.
-   - Webhook `payment.canceled` → `markFailed`, `rebillFailedAttempts=1`. Юзеру: «попробуем завтра».
-2. **Попытка 2** (через 24 часа от попытки 1, если failed): аналогично. `rebillFailedAttempts=2`.
-3. **Попытка 3** (через 24 часа от 2): аналогично. `rebillFailedAttempts=3`. Юзеру: «закроется через 24 часа».
-4. **Expire** (через 24 часа от 3-й failed): `SubscriptionStatus::Expired`, юзеру «подписка закрыта».
-
-В коде: `RebillScheduler::initiateCharges` создаёт 1-ю; `retryFailedAttempts` создаёт 2-ю и 3-ю; `expirePastDueSubscriptions` финализирует.
-
-## Восстановление после expire
-
-После `expired` пользователь идёт через `/upgrade`. Это **новый** платёж со стандартным S4-flow:
-
-- Telegram Payments → ЮKassa → списание + сохранение новой карты.
-- В `PaymentProcessor` `activatePro` создаёт новый период от `now`, **затирает** старый `savedPaymentMethodId` на новый (через `setSavedPaymentMethodId` в processor).
-- `rebillFailedAttempts` сбрасывается в 0.
-
-Не нужно отдельно удалять старую карту через `removePaymentMethod` — ЮKassa сама её зафризит без активности. Если хочется явно — у нас есть `YooKassaApiClient::removePaymentMethod` для будущего S6.
-
-## Зачем тройной retry
-
-Реальные причины фейлов списания:
-- **Недостаточно средств** — типично «закинули зарплату через день», retry имеет смысл.
-- **Истёкший срок карты** — retry бесполезен, но юзер сам менять карту тоже не побежит. Один retry-цикл закроет подписку и пришлёт явное «нужен новый /upgrade».
-- **Технический сбой ЮKassa** — крайне редко, retry почти всегда помогает.
-
-Эмпирически 24 часа × 3 попытки покрывает большинство сценариев без раздражающего «5 раз попытались списать за час».
+- `s5-no-rebill-3d-notification` — currentPeriodEnd через 65 часов → уведомление + флаг.
+- `s5-no-rebill-1d-notification` — currentPeriodEnd через 18 часов → уведомление + флаг.
+- `s5-no-rebill-expired-message` — currentPeriodEnd < now → текст «закончилась» + Expired.
+- `s5-subscription-renew-button-redirects-to-upgrade` — кнопка отдаёт callback `subscription:renew`, `UpgradeCallbackHandler::sendRenewalInvoice` существует.
