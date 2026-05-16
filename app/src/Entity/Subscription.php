@@ -77,37 +77,49 @@ class Subscription
     private ?\DateTimeImmutable $convertedFromTrialAt = null;
 
     /**
-     * Токен карты от ЮKassa (payment_method.id), сохранённый после
-     * первого успешного платежа через save_payment_method=true.
-     * Используется для recurring-списаний. NULL у админских grant'ов и
-     * платежей до S5 (или если save_payment_method не прошёл).
+     * DEAD CODE since 2026-05-16. Currently unused.
+     *
+     * Изначально S5 задумывалось как auto-rebill: после первого Telegram-
+     * платежа сохраняем токен карты ЮKassa, потом списываем без участия
+     * юзера. Но Telegram Payments не пробрасывает save_payment_method=true
+     * в ЮKassa (payment_method.saved всегда false). Без сохранённой карты
+     * recurring невозможен.
+     *
+     * Поле оставлено в БД (миграция Version20260520000000), может вернуться
+     * к жизни когда Telegram Payments начнёт поддерживать save_payment_method,
+     * или при переходе на ЮKassa Checkout / Telegram Stars.
      */
     #[ORM\Column(type: 'string', length: 64, nullable: true)]
     private ?string $savedPaymentMethodId = null;
 
     /**
-     * Включено ли автопродление. По умолчанию true, пользователь может
-     * отключить через /subscription. У триалов/cancelled значения не имеет.
-     * False означает «доступ до currentPeriodEnd, дальше Free».
+     * DEAD CODE since 2026-05-16. Currently unused.
+     *
+     * Был флагом UI «отключить автопродление». Auto-rebill отменён
+     * (см. {@see $savedPaymentMethodId}). Поле оставлено в БД для
+     * возможного возврата к recurring.
      */
     #[ORM\Column(type: 'boolean', options: ['default' => true])]
     private bool $autoRebillEnabled = true;
 
     /**
-     * Дедуп уведомления «через 24 часа спишется». Заполняется в
-     * RebillScheduler при отправке.
+     * DEAD CODE since 2026-05-16. Currently unused.
+     *
+     * Дедупликация уведомления «через 24 часа спишется» при auto-rebill.
+     * Сейчас replaced by notification_3d_renewal_sent_at /
+     * notification_1d_renewal_sent_at, которые используются для ручного
+     * renewal-цикла через /upgrade.
      *
      * name: явно — иначе UnderscoreNamingStrategy не вставит подчёркивание
-     * между буквой и цифрой (см. notification_3d_sent_at для аналогичного
-     * случая в S2).
+     * между буквой и цифрой (см. notification_3d_sent_at).
      */
     #[ORM\Column(name: 'notification_24h_before_rebill_sent_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?\DateTimeImmutable $notification24hBeforeRebillSentAt = null;
 
     /**
-     * Сколько подряд неудачных rebill-attempt'ов было после последнего
-     * успеха. Сбрасывается на 0 при успешном списании. После 3 — подписка
-     * идёт на expire через RebillScheduler.
+     * DEAD CODE since 2026-05-16. Currently unused.
+     *
+     * Был счётчиком подряд неудачных recurring-попыток. Auto-rebill отменён.
      */
     #[ORM\Column(type: 'smallint', options: ['default' => 0])]
     private int $rebillFailedAttempts = 0;

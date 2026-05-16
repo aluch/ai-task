@@ -61,18 +61,27 @@ class RebillScheduler
 
     public function run(\DateTimeImmutable $now): void
     {
-        $this->logger->info('RebillScheduler tick', ['now' => $now->format(\DateTimeInterface::ATOM)]);
-
-        $this->notifyUpcomingCharges($now);
-        $this->initiateCharges($now);
-        $this->retryFailedAttempts($now);
-        $this->expirePastDueSubscriptions($now);
+        // Auto-rebill отключён — TG Payments не передаёт save_payment_method
+        // в ЮKassa. Старые методы (notifyUpcomingCharges, initiateCharges,
+        // retryFailedAttempts, expirePastDueSubscriptions) — dead code,
+        // их вызов выключен. См. docs/payments.md «Почему нет auto-rebill».
+        //
+        // run() остаётся точкой входа для cron (TriggerRebillMessage). В
+        // следующем коммите S5-revert сюда придут новые методы для ручного
+        // renewal-цикла (notify за 3 дня / 1 день / expired).
+        $this->logger->info('RebillScheduler tick (no-op: auto-rebill disabled)', [
+            'now' => $now->format(\DateTimeInterface::ATOM),
+        ]);
     }
 
     /**
-     * Шаг 1. Подписки с auto_rebill_enabled, active-status, currentPeriodEnd
-     * в окне [now+23h, now+25h], notification ещё не отправлено → шлём
-     * уведомление и проставляем notification_24h_before_rebill_sent_at.
+     * DEAD CODE since 2026-05-16. Не вызывается из {@see run}. Оставлен
+     * для возможного возврата к auto-rebill — см. docs/payments.md.
+     *
+     * Шаг 1 (был): подписки с auto_rebill_enabled, active-status,
+     * currentPeriodEnd в окне [now+23h, now+25h], notification ещё не
+     * отправлено → шлём уведомление и проставляем
+     * notification_24h_before_rebill_sent_at.
      */
     public function notifyUpcomingCharges(\DateTimeImmutable $now): int
     {
@@ -107,10 +116,11 @@ class RebillScheduler
     }
 
     /**
-     * Шаг 2. Подписки с currentPeriodEnd в окне [now-1h, now+1h],
-     * сохранённым payment_method, без открытого pending-attempt'а —
-     * создаём attempt + дёргаем API. Окно −1h..+1h — буфер на случай
-     * пропуска tick'а или 15-минутной задержки.
+     * DEAD CODE since 2026-05-16. Не вызывается из {@see run}.
+     *
+     * Шаг 2 (был): за час до currentPeriodEnd создавали RecurringAttempt
+     * и дёргали ЮKassa createRecurringPayment. Невозможно без сохранённой
+     * карты (Telegram Payments save_payment_method не работает).
      */
     public function initiateCharges(\DateTimeImmutable $now): int
     {
@@ -150,8 +160,10 @@ class RebillScheduler
     }
 
     /**
-     * Шаг 3. Failed attempts которые завершились >24h назад и
-     * attempt_number < 3 → следующая попытка.
+     * DEAD CODE since 2026-05-16. Не вызывается из {@see run}.
+     *
+     * Шаг 3 (был): failed attempts >24h назад и attempt_number<3 →
+     * следующая попытка. Без recurring не имеет смысла.
      */
     public function retryFailedAttempts(\DateTimeImmutable $now): int
     {
@@ -198,8 +210,12 @@ class RebillScheduler
     }
 
     /**
-     * Шаг 4. Подписки с 3-мя failed-attempt'ами + последняя завершилась
-     * >24h назад → переводим в expired, уведомляем юзера.
+     * DEAD CODE since 2026-05-16. Не вызывается из {@see run}.
+     *
+     * Шаг 4 (был): подписки с 3-мя failed-attempt'ами + последняя
+     * >24h назад → expired. Истечение paid-Pro теперь через обычный
+     * {@see \App\Service\Subscription\SubscriptionExpirer::tick}, а
+     * уведомление об истечении шлёт renewal-notifier (см. {@see run}).
      */
     public function expirePastDueSubscriptions(\DateTimeImmutable $now): int
     {

@@ -19,14 +19,9 @@ use App\Entity\UsageCounter;
 use App\Service\AccessGate;
 use App\Service\HeartbeatTracker;
 use App\Entity\Payment;
-use App\Entity\RecurringAttempt;
-use App\Domain\Subscription\RecurringAttemptStatus;
 use App\Service\Subscription\Provider\YooKassa\InvoicePayloadBuilder;
 use App\Service\Subscription\Provider\YooKassa\PaymentProcessor;
 use App\Service\Subscription\Provider\YooKassa\PaymentValidator;
-use App\Service\Subscription\Provider\YooKassa\YooKassaIpAllowlist;
-use App\Service\Subscription\Recurring\RebillScheduler;
-use App\Service\Subscription\Recurring\RebillWebhookProcessor;
 use App\Service\Subscription\SubscriptionExpirer;
 use App\Service\Subscription\SubscriptionService;
 use App\Service\Subscription\SubscriptionStatsService;
@@ -86,9 +81,6 @@ final class ScenarioRunner
         private readonly InvoicePayloadBuilder $invoiceBuilder,
         private readonly PaymentValidator $paymentValidator,
         private readonly PaymentProcessor $paymentProcessor,
-        private readonly RebillScheduler $rebillScheduler,
-        private readonly RebillWebhookProcessor $webhookProcessor,
-        private readonly YooKassaIpAllowlist $yooKassaIpAllowlist,
     ) {
         $this->scenarios = [
             // reminder-пайплайн
@@ -168,16 +160,9 @@ final class ScenarioRunner
             's4-successful-payment-creates-subscription' => fn () => $this->s4SuccessfulPaymentCreatesSubscription(),
             's4-successful-payment-idempotent' => fn () => $this->s4SuccessfulPaymentIdempotent(),
             's4-successful-payment-on-trial-replaces-with-active' => fn () => $this->s4SuccessfulPaymentOnTrialReplacesWithActive(),
-            // S5: recurring billing
-            's5-payment-saves-method-id' => fn () => $this->s5PaymentSavesMethodId(),
-            's5-rebill-creates-attempt-when-period-ending' => fn () => $this->s5RebillCreatesAttemptWhenPeriodEnding(),
-            's5-webhook-succeeded-extends-subscription' => fn () => $this->s5WebhookSucceededExtendsSubscription(),
-            's5-webhook-failed-keeps-active-on-attempt-1' => fn () => $this->s5WebhookFailedKeepsActiveOnAttempt1(),
-            's5-webhook-failed-on-attempt-3-marks-for-expiration' => fn () => $this->s5WebhookFailedOnAttempt3MarksForExpiration(),
-            's5-rebill-attempt-idempotent' => fn () => $this->s5RebillAttemptIdempotent(),
-            's5-notification-24h-before-rebill' => fn () => $this->s5Notification24hBeforeRebill(),
-            's5-disable-rebill-keeps-active-until-period-end' => fn () => $this->s5DisableRebillKeepsActiveUntilPeriodEnd(),
-            's5-webhook-rejects-untrusted-ip' => fn () => $this->s5WebhookRejectsUntrustedIp(),
+            // S5: auto-rebill откатан (TG Payments save_payment_method не работает).
+            // Подписки продляются вручную через /upgrade. См. docs/payments.md.
+            // Smoke-сценарии добавляются в следующем коммите.
         ];
     }
 
@@ -2016,10 +2001,12 @@ final class ScenarioRunner
 
     private function s3SubscriptionCancelFlow(): ScenarioResult
     {
-        // S3 testilo hard-cancel через SubscriptionService::cancel. В S5 hard
-        // cancel удалён и заменён на disable_rebill (мягкая отмена через
-        // флаг). Адаптируем сценарий — теперь проверяем что новый confirm
-        // содержит правильные callback'и, и подписка остаётся active.
+        // S3 testilo hard-cancel через SubscriptionService::cancel. После
+        // отката auto-rebill (2026-05-16) UI отмены подписки удалён вовсе —
+        // подписка истечёт сама в SubscriptionExpirer когда придёт время.
+        // Адаптируем сценарий: проверяем что active Pro в /subscription
+        // показывает кнопку «Продлить сейчас» (callback subscription:renew),
+        // а не legacy cancel/disable_rebill.
         $name = 's3-subscription-cancel-flow';
         $this->purgeAllSubscriptions();
         $u = $this->ensureCleanSubUser('2000020004', 'S3SubCancel');
@@ -2030,32 +2017,20 @@ final class ScenarioRunner
             return ScenarioResult::fail($name, 0, 'не нашёл активную Pro-подписку');
         }
 
-        // 1. confirm-экран новой механики disable_rebill.
-        $confirm = $this->subBuilder->buildDisableRebillConfirm($u, $sub);
-        $cbConfirm = $confirm['keyboard'][0][0]['callback_data'] ?? null;
-        $cbAbort = $confirm['keyboard'][0][1]['callback_data'] ?? null;
-        if ($cbConfirm !== 'subscription:disable_rebill:confirm' || $cbAbort !== 'subscription:disable_rebill:abort') {
-            return ScenarioResult::fail($name, 0, "ожидались callback'и subscription:disable_rebill:{confirm,abort}, получены {$cbConfirm}|{$cbAbort}");
+        $payload = $this->subBuilder->buildForActivePro($u, $sub, $now);
+        $cb = $payload['keyboard'][0][0]['callback_data'] ?? null;
+        if ($cb !== 'subscription:renew') {
+            return ScenarioResult::fail($name, 0, "ожидался subscription:renew, получен {$cb}");
         }
-
-        // 2. Эффект отмены: auto_rebill_enabled=false, статус остаётся active.
-        $sub->setAutoRebillEnabled(false);
-        $this->doctrine->getManager()->flush();
-        $fresh = $this->subscriptions->getActiveSubscription($u);
-        if ($fresh?->getStatus() !== SubscriptionStatus::Active) {
-            return ScenarioResult::fail($name, 0, 'после disable_rebill статус должен остаться Active');
+        if (!str_contains($payload['text'], 'активна')) {
+            return ScenarioResult::fail($name, 0, 'нет слова «активна» в тексте');
         }
-        if ($fresh?->isAutoRebillEnabled() !== false) {
-            return ScenarioResult::fail($name, 0, 'auto_rebill_enabled не выставлен в false');
-        }
-        if ($this->subscriptions->getCurrentPlan($u) !== Plan::Pro) {
-            return ScenarioResult::fail($name, 0, 'после disable_rebill currentPlan != Pro');
-        }
-
-        // 3. /subscription показывает rebill-off вариант.
-        $payload = $this->subBuilder->buildForActiveProRebillOff($u, $fresh, $now);
-        if (!str_contains($payload['text'], 'автопродление отключено')) {
-            return ScenarioResult::fail($name, 0, 'rebill-off экран без «автопродление отключено»');
+        // Legacy cancel/disable_rebill callback'ов быть не должно.
+        $allCb = array_column($payload['keyboard'][0] ?? [], 'callback_data');
+        foreach ($allCb as $c) {
+            if (str_contains((string) $c, 'cancel') || str_contains((string) $c, 'rebill')) {
+                return ScenarioResult::fail($name, 0, "legacy callback в клавиатуре: {$c}");
+            }
         }
 
         return ScenarioResult::pass($name, 0);
@@ -2431,372 +2406,6 @@ final class ScenarioRunner
         return ScenarioResult::pass($name, 0);
     }
 
-    // ────────────────────────────── S5 ──────────────────────────────
-
-    /**
-     * Минимальный smoke без реального API ЮKassa: проверяем что entity
-     * корректно сохраняет saved_payment_method_id, и RebillScheduler
-     * находит такие подписки в initiateCharges. Реальный flow «после
-     * успешного TG-платежа PaymentProcessor дёрнул API getPayment и
-     * записал token» требует mock-API; защищается от регрессий на
-     * прод-стенде через live-проверку первой оплаты.
-     */
-    private function s5PaymentSavesMethodId(): ScenarioResult
-    {
-        $name = 's5-payment-saves-method-id';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040001', 'S5SaveMethod');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
-        $sub = $this->subscriptions->getActiveSubscription($u);
-        if ($sub === null) {
-            return ScenarioResult::fail($name, 0, 'preconditions: подписка не создана');
-        }
-        $sub->setSavedPaymentMethodId('2bfbd6c0-test-method-id');
-        $this->doctrine->getManager()->flush();
-
-        $fresh = $this->subscriptions->getActiveSubscription($u);
-        if ($fresh?->getSavedPaymentMethodId() !== '2bfbd6c0-test-method-id') {
-            return ScenarioResult::fail($name, 0, 'saved_payment_method_id не сохранился в БД');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5RebillCreatesAttemptWhenPeriodEnding(): ScenarioResult
-    {
-        $name = 's5-rebill-creates-attempt-when-period-ending';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040002', 'S5Rebill');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        // Создаём активную подписку с currentPeriodEnd в 30 минутах —
-        // попадает в окно initiateCharges (now-1h .. now+1h).
-        $em = $this->doctrine->getManager();
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-30 days'),
-            currentPeriodEnd: $now->modify('+30 minutes'),
-        );
-        $sub->setSavedPaymentMethodId('test-method-active');
-        $em->persist($sub);
-        $em->flush();
-
-        // Запуск scheduler'а. На стенде нет реального ЮKassa API —
-        // YooKassaApiClient бросит LogicException, scheduler поймает,
-        // attempt останется в БД но с status=failed. Нам важно проверить
-        // что attempt в принципе создан (это шаг до API-вызова).
-        $this->rebillScheduler->initiateCharges($now);
-
-        $em->clear();
-        $attempts = $em->getRepository(RecurringAttempt::class)->findAll();
-        if (count($attempts) !== 1) {
-            return ScenarioResult::fail($name, 0, 'в БД не появилась запись recurring_attempts');
-        }
-        $a = $attempts[0];
-        if ($a->getAttemptNumber() !== 1) {
-            return ScenarioResult::fail($name, 0, "attempt_number={$a->getAttemptNumber()}, ожидался 1");
-        }
-        if ($a->getAmountMinor() !== $this->invoiceBuilder->getAmountMinor()) {
-            return ScenarioResult::fail($name, 0, 'amount_minor в attempt не совпадает с PlanCatalog');
-        }
-        // idempotenceKey должен быть установлен (UUID v4).
-        if ($a->getIdempotenceKey()->toRfc4122() === '') {
-            return ScenarioResult::fail($name, 0, 'idempotenceKey не сгенерирован');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5WebhookSucceededExtendsSubscription(): ScenarioResult
-    {
-        $name = 's5-webhook-succeeded-extends-subscription';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040003', 'S5WhSucc');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        $em = $this->doctrine->getManager();
-        $oldPeriodEnd = $now->modify('+1 hour');
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-30 days'),
-            currentPeriodEnd: $oldPeriodEnd,
-        );
-        $sub->setSavedPaymentMethodId('test-method');
-        $em->persist($sub);
-        $attempt = new RecurringAttempt($sub, 1, $this->invoiceBuilder->getAmountMinor(), $now);
-        $em->persist($attempt);
-        $em->flush();
-
-        $webhook = $this->makeWebhookPayload('payment.succeeded', $attempt, [
-            'id' => 'remote-pay-' . uniqid(),
-        ]);
-        $result = $this->webhookProcessor->process($webhook, $now);
-        if ($result !== \App\Service\Subscription\Recurring\RebillWebhookProcessor::RESULT_OK) {
-            return ScenarioResult::fail($name, 0, "ожидался OK, получили {$result}");
-        }
-
-        $em->clear();
-        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
-        $expectedEnd = $oldPeriodEnd->modify('+' . InvoicePayloadBuilder::DEFAULT_PRO_PERIOD_DAYS . ' days');
-        if ($fresh?->getCurrentPeriodEnd()->format('Y-m-d') !== $expectedEnd->format('Y-m-d')) {
-            return ScenarioResult::fail($name, 0, 'currentPeriodEnd не сдвинулся на +30 дней');
-        }
-
-        $payments = $em->getRepository(Payment::class)->findAll();
-        if (count($payments) !== 1) {
-            return ScenarioResult::fail($name, 0, 'не создался Payment в БД');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5WebhookFailedKeepsActiveOnAttempt1(): ScenarioResult
-    {
-        $name = 's5-webhook-failed-keeps-active-on-attempt-1';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040004', 'S5WhFail1');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        $em = $this->doctrine->getManager();
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-30 days'),
-            currentPeriodEnd: $now->modify('+1 hour'),
-        );
-        $sub->setSavedPaymentMethodId('test-method');
-        $em->persist($sub);
-        $attempt = new RecurringAttempt($sub, 1, $this->invoiceBuilder->getAmountMinor(), $now);
-        $em->persist($attempt);
-        $em->flush();
-
-        $webhook = $this->makeWebhookPayload('payment.canceled', $attempt, [
-            'id' => 'remote-fail-1',
-            'cancellation_details' => ['reason' => 'insufficient_funds', 'party' => 'payment_network'],
-        ]);
-        $result = $this->webhookProcessor->process($webhook, $now);
-        if ($result !== \App\Service\Subscription\Recurring\RebillWebhookProcessor::RESULT_OK) {
-            return ScenarioResult::fail($name, 0, "ожидался OK, получили {$result}");
-        }
-
-        $em->clear();
-        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
-        if ($fresh?->getStatus() !== SubscriptionStatus::Active) {
-            return ScenarioResult::fail($name, 0, 'после 1 failed подписка не должна терять active');
-        }
-        if ($fresh?->getRebillFailedAttempts() !== 1) {
-            return ScenarioResult::fail($name, 0, "rebillFailedAttempts={$fresh?->getRebillFailedAttempts()}, ожидался 1");
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5WebhookFailedOnAttempt3MarksForExpiration(): ScenarioResult
-    {
-        $name = 's5-webhook-failed-on-attempt-3-marks-for-expiration';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040005', 'S5Wh3');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        $em = $this->doctrine->getManager();
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-31 days'),
-            currentPeriodEnd: $now->modify('-1 hour'),
-        );
-        $sub->setSavedPaymentMethodId('test-method');
-        $sub->setRebillFailedAttempts(2);
-        $em->persist($sub);
-        // 3-я попытка failed более 24 часов назад.
-        $a3 = new RecurringAttempt($sub, 3, $this->invoiceBuilder->getAmountMinor(), $now->modify('-25 hours'));
-        $em->persist($a3);
-        $em->flush();
-        $a3->markFailed('insufficient_funds', 'payment_network', $now->modify('-25 hours'));
-        $sub->setRebillFailedAttempts(3);
-        $em->flush();
-
-        // expirePastDueSubscriptions должен перевести в expired.
-        $expired = $this->rebillScheduler->expirePastDueSubscriptions($now);
-        if ($expired !== 1) {
-            return ScenarioResult::fail($name, 0, "ожидался 1 expired, получено {$expired}");
-        }
-        $em->clear();
-        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
-        if ($fresh?->getStatus() !== SubscriptionStatus::Expired) {
-            return ScenarioResult::fail($name, 0, 'подписка не перешла в expired');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5RebillAttemptIdempotent(): ScenarioResult
-    {
-        $name = 's5-rebill-attempt-idempotent';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040006', 'S5Idem');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        $em = $this->doctrine->getManager();
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-30 days'),
-            currentPeriodEnd: $now->modify('+1 hour'),
-        );
-        $sub->setSavedPaymentMethodId('test-method');
-        $em->persist($sub);
-        $attempt = new RecurringAttempt($sub, 1, $this->invoiceBuilder->getAmountMinor(), $now);
-        $em->persist($attempt);
-        $em->flush();
-
-        $externalId = 'remote-idem-' . uniqid();
-        $webhook = $this->makeWebhookPayload('payment.succeeded', $attempt, ['id' => $externalId]);
-
-        $first = $this->webhookProcessor->process($webhook, $now);
-        if ($first !== \App\Service\Subscription\Recurring\RebillWebhookProcessor::RESULT_OK) {
-            return ScenarioResult::fail($name, 0, "первый webhook вернул {$first}, ожидался OK");
-        }
-
-        $second = $this->webhookProcessor->process($webhook, $now->modify('+1 minute'));
-        if ($second !== \App\Service\Subscription\Recurring\RebillWebhookProcessor::RESULT_DUPLICATE) {
-            return ScenarioResult::fail($name, 0, "второй webhook вернул {$second}, ожидался DUPLICATE");
-        }
-
-        $em->clear();
-        $payments = $em->getRepository(Payment::class)->findAll();
-        if (count($payments) !== 1) {
-            return ScenarioResult::fail($name, 0, 'дубль webhook-callback-а создал второй Payment');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5Notification24hBeforeRebill(): ScenarioResult
-    {
-        $name = 's5-notification-24h-before-rebill';
-        $this->purgeAllSubscriptions();
-        $this->harness->notifier()->clear();
-        $u = $this->ensureCleanSubUser('2000040007', 'S5Notify');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-
-        $em = $this->doctrine->getManager();
-        $sub = new Subscription(
-            user: $u,
-            plan: Plan::Pro,
-            status: SubscriptionStatus::Active,
-            currentPeriodStart: $now->modify('-30 days'),
-            // currentPeriodEnd в 24 часах — попадает в окно 23-25h.
-            currentPeriodEnd: $now->modify('+24 hours'),
-        );
-        $sub->setSavedPaymentMethodId('test-method');
-        $em->persist($sub);
-        $em->flush();
-
-        $sent = $this->rebillScheduler->notifyUpcomingCharges($now);
-        if ($sent !== 1) {
-            return ScenarioResult::fail($name, 0, "ожидалось 1 уведомление, отправлено {$sent}");
-        }
-        $em->clear();
-        $fresh = $em->getRepository(Subscription::class)->find($sub->getId());
-        if ($fresh?->getNotification24hBeforeRebillSentAt() === null) {
-            return ScenarioResult::fail($name, 0, 'notification flag не проставлен');
-        }
-
-        // Повторный tick не должен дублировать.
-        $secondTick = $this->rebillScheduler->notifyUpcomingCharges($now->modify('+10 minutes'));
-        if ($secondTick !== 0) {
-            return ScenarioResult::fail($name, 0, "повторный tick отправил {$secondTick} уведомлений (ожидался 0)");
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5DisableRebillKeepsActiveUntilPeriodEnd(): ScenarioResult
-    {
-        $name = 's5-disable-rebill-keeps-active-until-period-end';
-        $this->purgeAllSubscriptions();
-        $u = $this->ensureCleanSubUser('2000040008', 'S5Disable');
-        $now = new \DateTimeImmutable('2026-05-12 12:00:00 UTC');
-        $this->subscriptions->activatePro($u, $now, $now->modify('+30 days'), null, $now);
-        $sub = $this->subscriptions->getActiveSubscription($u);
-        if ($sub === null) {
-            return ScenarioResult::fail($name, 0, 'preconditions: подписка не создана');
-        }
-
-        $sub->setAutoRebillEnabled(false);
-        $this->doctrine->getManager()->flush();
-
-        $fresh = $this->subscriptions->getActiveSubscription($u);
-        if ($fresh?->getStatus() !== SubscriptionStatus::Active) {
-            return ScenarioResult::fail($name, 0, 'статус не должен меняться (только флаг)');
-        }
-        if ($fresh?->isAutoRebillEnabled() !== false) {
-            return ScenarioResult::fail($name, 0, 'auto_rebill_enabled должен быть false');
-        }
-        // RebillScheduler не должен подбирать subscription с auto_rebill=false.
-        $started = $this->rebillScheduler->initiateCharges($now->modify('+29 days 23 hours'));
-        if ($started !== 0) {
-            return ScenarioResult::fail($name, 0, "scheduler начал {$started} списания для disabled-подписки");
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    private function s5WebhookRejectsUntrustedIp(): ScenarioResult
-    {
-        $name = 's5-webhook-rejects-untrusted-ip';
-        // IP allowlist живёт в const — проверяем напрямую.
-        if ($this->yooKassaIpAllowlist->isAllowed('1.2.3.4')) {
-            return ScenarioResult::fail($name, 0, '1.2.3.4 пропущен через allowlist');
-        }
-        if ($this->yooKassaIpAllowlist->isAllowed(null)) {
-            return ScenarioResult::fail($name, 0, 'null IP пропущен');
-        }
-        if ($this->yooKassaIpAllowlist->isAllowed('')) {
-            return ScenarioResult::fail($name, 0, 'пустой IP пропущен');
-        }
-        // Положительный — из CIDR 185.71.76.0/27 берём адрес.
-        if (!$this->yooKassaIpAllowlist->isAllowed('185.71.76.5')) {
-            return ScenarioResult::fail($name, 0, 'IP из официального CIDR ЮKassa отбит как чужой');
-        }
-
-        return ScenarioResult::pass($name, 0);
-    }
-
-    /**
-     * @param array<string, mixed> $extraObjectFields
-     * @return array<string, mixed>
-     */
-    private function makeWebhookPayload(string $event, RecurringAttempt $attempt, array $extraObjectFields): array
-    {
-        return [
-            'type' => 'notification',
-            'event' => $event,
-            'object' => array_merge(
-                [
-                    'status' => 'succeeded',
-                    'amount' => [
-                        'value' => number_format($attempt->getAmountMinor() / 100, 2, '.', ''),
-                        'currency' => 'RUB',
-                    ],
-                    'metadata' => [
-                        'subscription_id' => $attempt->getSubscription()->getId()->toRfc4122(),
-                        'attempt_id' => $attempt->getId()->toRfc4122(),
-                    ],
-                ],
-                $extraObjectFields,
-            ),
-        ];
-    }
 
     private function setupFreshAssistant(): User
     {

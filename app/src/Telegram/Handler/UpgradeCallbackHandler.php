@@ -66,20 +66,49 @@ class UpgradeCallbackHandler
             return;
         }
 
-        // Уже active Pro — не даём купить второй раз. Active важно отличить
-        // от Cancelled-но-ещё-действует и от Trialing: при триале можно
-        // купить (триал погасится в activatePro), при Cancelled тоже —
-        // пользователь, возможно, передумал.
+        // Уже active Pro — не даём купить второй раз через /upgrade.
+        // Для продления используется кнопка «💎 Продлить сейчас» в
+        // /subscription → {@see sendRenewalInvoice}, она этот guard
+        // обходит сознательно.
         $current = $this->subscriptions->getActiveSubscription($user);
         if ($current !== null && $current->getStatus() === SubscriptionStatus::Active) {
             $bot->answerCallbackQuery(
-                text: 'У тебя уже Pro — всё ок.',
+                text: 'У тебя уже Pro — всё ок. Продлить можно через /subscription.',
                 show_alert: true,
             );
 
             return;
         }
 
+        $bot->answerCallbackQuery();
+        $this->sendInvoice($bot, $user);
+    }
+
+    /**
+     * Отправить invoice для ручного renewal активной Pro-подписки.
+     * Bypass'ит «уже active Pro» guard — это явное намерение
+     * пользователя продлить ДО истечения.
+     *
+     * Вызывается из {@see SubscriptionCallbackHandler::handleRenew}
+     * (callback `subscription:renew`).
+     */
+    public function sendRenewalInvoice(Nutgram $bot, \App\Entity\User $user): void
+    {
+        if ($this->gate->isAdmin($user)) {
+            $payload = $this->builder->buildForAdmin($user);
+            $bot->sendMessage(text: $payload['text']);
+
+            return;
+        }
+        $this->sendInvoice($bot, $user);
+    }
+
+    /**
+     * Общая логика отправки invoice. answerCallbackQuery должна быть
+     * сделана вызывающим.
+     */
+    private function sendInvoice(Nutgram $bot, \App\Entity\User $user): void
+    {
         // Платежи не сконфигурированы — admin/dev могут поднять стенд без
         // настоящих ключей. Не падать в HTTP-ошибку, а ответить честно.
         if (!$this->yooKassa->isConfigured()) {
@@ -87,7 +116,6 @@ class UpgradeCallbackHandler
                 'user_id' => $user->getId()->toRfc4122(),
                 'mode' => $this->yooKassa->getMode(),
             ]);
-            $bot->answerCallbackQuery();
             $bot->sendMessage(
                 text: '⚠️ Платежи пока не сконфигурированы на сервере. Попробуй чуть позже или напиши автору.',
             );
@@ -98,13 +126,12 @@ class UpgradeCallbackHandler
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $invoicePayload = $this->invoice->buildPayload($user, $now);
 
-        $bot->answerCallbackQuery();
-        // provider_data: только save_payment_method=true (без receipt-блока).
-        // Receipt не передаём — самозанятый формирует чеки 54-ФЗ через «Мой
-        // налог» сам (S4 fix). save_payment_method=true — нужно для S5
-        // recurring: ЮKassa сохраняет карту и возвращает payment_method.id
-        // в payload payment'а, который мы потом дёргаем через
-        // YooKassaApiClient::getPayment и пишем в Subscription.
+        // provider_data НЕ передаём:
+        //  - receipt-блок не нужен (самозанятый формирует чеки 54-ФЗ через
+        //    «Мой налог» сам, см. S4 fix);
+        //  - save_payment_method=true не работает: Telegram Payments не
+        //    пробрасывает этот параметр в ЮKassa корректно, токен карты
+        //    не сохраняется (см. docs/payments.md «Почему нет auto-rebill»).
         $bot->sendInvoice(
             title: $this->invoice->getInvoiceTitle(),
             description: $this->invoice->getInvoiceDescription(),
@@ -113,7 +140,6 @@ class UpgradeCallbackHandler
             currency: InvoicePayloadBuilder::CURRENCY,
             prices: $this->invoice->buildPrices(),
             start_parameter: 'pomni-pro',
-            provider_data: $this->invoice->buildProviderDataForRecurring(),
         );
 
         $this->logger->info('Invoice sent', [

@@ -27,8 +27,6 @@ class PaymentProcessor
         private readonly ManagerRegistry $doctrine,
         private readonly SubscriptionService $subscriptions,
         private readonly InvoicePayloadBuilder $invoice,
-        private readonly YooKassaApiClient $api,
-        private readonly YooKassaConfig $config,
         private readonly LoggerInterface $logger,
     ) {
     }
@@ -93,46 +91,20 @@ class PaymentProcessor
         $em->persist($payment);
         $em->flush();
 
-        // S5: вытаскиваем токен сохранённой карты через ЮKassa REST API.
-        // Делаем это только если у нас есть shop_id + secret_key (если
-        // настроен только provider_token — recurring не заработает,
-        // оставляем savedPaymentMethodId=null, новые платежи будут только
-        // через явный /upgrade). Сбои API не валят основной flow —
-        // подписка уже активирована, токен можно подтянуть позже.
-        if ($this->config->isConfigured() && $this->config->getSecretKey() !== '') {
-            try {
-                $remote = $this->api->getPayment($providerPaymentChargeId);
-                $paymentMethodId = $remote['payment_method']['id'] ?? null;
-                $saved = $remote['payment_method']['saved'] ?? false;
-                if ($paymentMethodId !== null && $saved === true) {
-                    $subscription->setSavedPaymentMethodId($paymentMethodId);
-                    // После успеха сбрасываем счётчик неудач (если был).
-                    $subscription->setRebillFailedAttempts(0);
-                    $em->flush();
-                    $this->logger->info('Saved payment method id captured', [
-                        'subscription_id' => $subscription->getId()->toRfc4122(),
-                        'payment_method_id' => $paymentMethodId,
-                    ]);
-                } else {
-                    $this->logger->warning('Payment did not return saved payment_method', [
-                        'payment_id' => $providerPaymentChargeId,
-                        'saved' => $saved,
-                    ]);
-                }
-            } catch (\Throwable $e) {
-                $this->logger->error('Failed to fetch payment_method from YooKassa', [
-                    'payment_id' => $providerPaymentChargeId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        // S5-WAS: после успешного платежа дёргали GET /payments/{id} и
+        // сохраняли payment_method.id в Subscription.savedPaymentMethodId
+        // для будущих recurring-списаний. Откатано: Telegram Payments
+        // не передаёт save_payment_method=true в ЮKassa корректно
+        // (payment_method.saved всегда false). Recurring без сохранённой
+        // карты невозможен. Подписка продлевается через явный /upgrade.
+        // YooKassaApiClient и RecurringAttempt оставлены как dead code
+        // на случай возврата (см. docs/payments.md «Почему нет auto-rebill»).
 
         $this->logger->info('Payment processed and Pro activated', [
             'user_id' => $user->getId()->toRfc4122(),
             'payment_id' => $payment->getId()->toRfc4122(),
             'amount_minor' => $totalAmount,
             'period_end' => $periodEnd->format(\DateTimeInterface::ATOM),
-            'saved_payment_method_id' => $subscription->getSavedPaymentMethodId(),
         ]);
 
         return new PaymentProcessResult(
