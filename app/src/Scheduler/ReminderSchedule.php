@@ -10,6 +10,7 @@ use App\Message\CheckSingleRemindersMessage;
 use App\Message\CheckSnoozeWakeupsMessage;
 use App\Message\ExpireSubscriptionsMessage;
 use App\Message\NotifyTrialEndingMessage;
+use App\Message\TriggerRebillMessage;
 use Symfony\Component\Scheduler\Attribute\AsSchedule;
 use Symfony\Component\Scheduler\RecurringMessage;
 use Symfony\Component\Scheduler\Schedule;
@@ -50,6 +51,10 @@ final class ReminderSchedule implements ScheduleProviderInterface
             // Окна notify-проверок (60h..72h, 12h..24h) с запасом ловят
             // 5-минутный шаг.
             ->add(RecurringMessage::every('5 minutes', new NotifyTrialEndingMessage()))
-            ->add(RecurringMessage::every('5 minutes', new ExpireSubscriptionsMessage()));
+            ->add(RecurringMessage::every('5 minutes', new ExpireSubscriptionsMessage()))
+            // S5 recurring billing — каждые 15 минут. Окна шире (±1 час
+            // для initiate, 23-25 часов для notify-24h), 15-минутный шаг
+            // ловит их с двойным запасом.
+            ->add(RecurringMessage::every('15 minutes', new TriggerRebillMessage()));
     }
 }
