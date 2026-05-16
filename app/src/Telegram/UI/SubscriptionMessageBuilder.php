@@ -40,6 +40,9 @@ final class SubscriptionMessageBuilder
     }
 
     /**
+     * Active Pro с включённым auto-rebill. Показываем цену следующего
+     * списания (она же — для пользователя «следующий платёж»).
+     *
      * @return array{text: string, keyboard: array<int, array<int, array{text: string, callback_data: string}>>}
      */
     public function buildForActivePro(User $user, Subscription $sub, \DateTimeImmutable $now): array
@@ -47,22 +50,54 @@ final class SubscriptionMessageBuilder
         $until = $this->fmtDate($sub->getCurrentPeriodEnd(), $user);
         $used = $this->usedProActions($user, $now);
         $proLimit = $this->catalog->actionLimit(Plan::Pro);
+        $priceRub = (int) round($this->catalog->priceRubMinor(Plan::Pro) / 100);
 
         $text = <<<TXT
             💎 Pro
 
             Статус: активна
-            Следующее списание: {$until}
+            Следующее списание: {$until} — {$priceRub} ₽
             Использовано в этом месяце: {$used} / {$proLimit}
             TXT;
 
         $row = [
-            ['text' => '❌ Отменить подписку', 'callback_data' => 'subscription:cancel'],
+            ['text' => '❌ Отменить автопродление', 'callback_data' => 'subscription:disable_rebill'],
         ];
-        // «Управление в ЮKassa» — пока скрываем (S4). Показывали бы при
-        // наличии externalSubscriptionId.
 
         return ['text' => $text, 'keyboard' => [$row]];
+    }
+
+    /**
+     * Active Pro, но auto-rebill отключён. Подписка работает до
+     * currentPeriodEnd, дальше Free, если не возобновишь.
+     *
+     * @return array{text: string, keyboard: array<int, array<int, array{text: string, callback_data: string}>>}
+     */
+    public function buildForActiveProRebillOff(User $user, Subscription $sub, \DateTimeImmutable $now): array
+    {
+        $until = $this->fmtDate($sub->getCurrentPeriodEnd(), $user);
+        $used = $this->usedProActions($user, $now);
+        $proLimit = $this->catalog->actionLimit(Plan::Pro);
+
+        $text = <<<TXT
+            💎 Pro (автопродление отключено)
+
+            Действует до: {$until}
+            Дальше — Free, если не возобновишь.
+
+            Использовано: {$used} / {$proLimit}
+            TXT;
+
+        $keyboard = [
+            [
+                ['text' => '✅ Возобновить автопродление', 'callback_data' => 'subscription:enable_rebill'],
+            ],
+            [
+                ['text' => '💎 Оплатить ещё месяц', 'callback_data' => 'upgrade:info'],
+            ],
+        ];
+
+        return ['text' => $text, 'keyboard' => $keyboard];
     }
 
     /**
@@ -147,34 +182,45 @@ final class SubscriptionMessageBuilder
     }
 
     /**
-     * Текст подтверждения отмены подписки (двухшаговый flow).
+     * Confirm-экран для «отключить автопродление». Это мягкая отмена:
+     * подписка остаётся active до currentPeriodEnd, после этого Free.
+     * Старый hard-cancel (status=Cancelled) был объединён с этим flow.
      *
      * @return array{text: string, keyboard: array<int, array<int, array{text: string, callback_data: string}>>}
      */
-    public function buildCancelConfirm(User $user, Subscription $sub): array
+    public function buildDisableRebillConfirm(User $user, Subscription $sub): array
     {
         $until = $this->fmtDate($sub->getCurrentPeriodEnd(), $user);
         $text = <<<TXT
-            ⚠️ Точно отменить Pro-подписку?
+            ⚠️ Точно отключить автопродление?
 
-            Доступ останется до {$until}, потом — переход на Free.
+            Доступ Pro останется до {$until}, дальше — переход на Free.
+            Списание не произойдёт.
             TXT;
 
         $keyboard = [
             [
-                ['text' => '✅ Да, отменить', 'callback_data' => 'subscription:cancel:confirm'],
-                ['text' => '❌ Нет', 'callback_data' => 'subscription:cancel:abort'],
+                ['text' => '✅ Да, отключить', 'callback_data' => 'subscription:disable_rebill:confirm'],
+                ['text' => '❌ Нет', 'callback_data' => 'subscription:disable_rebill:abort'],
             ],
         ];
 
         return ['text' => $text, 'keyboard' => $keyboard];
     }
 
-    public function buildCancelDone(User $user, Subscription $sub): string
+    public function buildDisableRebillDone(User $user, Subscription $sub): string
     {
         $until = $this->fmtDate($sub->getCurrentPeriodEnd(), $user);
 
-        return "✅ Подписка отменена. Доступ Pro действует до {$until}, дальше — Free.";
+        return "✅ Автопродление отключено. Доступ Pro действует до {$until}, дальше — Free.\n\n"
+            . 'Если передумаешь — /subscription → «Возобновить автопродление».';
+    }
+
+    public function buildEnableRebillDone(User $user, Subscription $sub): string
+    {
+        $until = $this->fmtDate($sub->getCurrentPeriodEnd(), $user);
+
+        return "✅ Автопродление включено. Следующее списание — {$until}.";
     }
 
     private function fmtDate(\DateTimeImmutable $at, User $user): string

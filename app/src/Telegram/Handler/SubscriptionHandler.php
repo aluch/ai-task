@@ -50,7 +50,12 @@ class SubscriptionHandler
         }
 
         match ($sub->getStatus()) {
-            SubscriptionStatus::Active => $this->send($bot, $this->builder->buildForActivePro($user, $sub, $now)),
+            SubscriptionStatus::Active => $this->send(
+                $bot,
+                $sub->isAutoRebillEnabled()
+                    ? $this->builder->buildForActivePro($user, $sub, $now)
+                    : $this->builder->buildForActiveProRebillOff($user, $sub, $now),
+            ),
             SubscriptionStatus::Trialing => $this->send($bot, $this->builder->buildForTrial($user, $sub, $now)),
             SubscriptionStatus::Cancelled => $this->send($bot, $this->builder->buildForCancelled($user, $sub, $now)),
             default => $this->send($bot, $this->builder->buildForFree($user, $now)),

@@ -112,8 +112,93 @@ allowed_updates: ["message", "edited_message", "callback_query", "pre_checkout_q
 - payload подписан намерением (`user_id`/`amount_minor`), проверяется в pre_checkout. Подмена суммы на стороне клиента отбивается.
 - `provider_token` хранится в env-переменной, путь от env до сервиса — через `YooKassaConfig`, без хардкодов.
 
+## Recurring billing (S5)
+
+После первого Telegram-платежа подписка может автоматически продлеваться через сохранённый токен карты. Подробное руководство по UX-стейтам и сценариям ошибок — `docs/subscriptions-recurring.md`.
+
+### Архитектура
+
+```
+First payment (S4):
+    User → /upgrade → sendInvoice(provider_data.save_payment_method=true)
+        → Telegram → ЮKassa (списание + сохранение карты)
+        ← successful_payment
+    PaymentProcessor → GET /payments/{id} via YooKassaApiClient
+        → payment_method.id записываем в Subscription.savedPaymentMethodId
+
+Auto-rebill (S5, каждые 15 минут):
+    RebillScheduler.run(now)
+      ├─ notifyUpcomingCharges       за 23-25 часов до периода — Telegram-уведомление
+      ├─ initiateCharges             за час до периода — RecurringAttempt + POST /payments
+      ├─ retryFailedAttempts         failed > 24h, attempt < 3 — следующий attempt
+      └─ expirePastDueSubscriptions  3 failed + последняя > 24h — status=expired
+
+YooKassa async result:
+    ЮKassa → POST /api/yookassa/webhook (с payment.succeeded / payment.canceled)
+        → YooKassaWebhookController → RebillWebhookProcessor
+        → RecurringAttempt.markSucceeded/Failed
+        → Payment + activatePro (на 30 дней дальше) при успехе
+```
+
+### Ключевые объекты
+
+| Класс | Назначение |
+|---|---|
+| `Subscription.savedPaymentMethodId` | Токен карты от ЮKassa (uuid). NULL — recurring невозможен. |
+| `Subscription.autoRebillEnabled` | Пользовательский флаг включения автопродления. Default true. |
+| `Subscription.notification24hBeforeRebillSentAt` | Дедуп уведомления «завтра спишется». |
+| `Subscription.rebillFailedAttempts` | Сколько неудач подряд после последнего успеха. >= 3 — на expire. |
+| `RecurringAttempt` | Журнал одной попытки списания (UUID, idempotenceKey, status, error_*). |
+| `RebillScheduler` | 4 фазы: notify-24h / initiate / retry / expire. |
+| `RebillWebhookProcessor` | Идемпотентная обработка webhook'а, продление подписки или фикс failure. |
+| `YooKassaApiClient` | REST-клиент (Basic-auth shopId/secretKey): getPayment, createRecurringPayment, removePaymentMethod. |
+| `YooKassaIpAllowlist` | Список IP-блоков ЮKassa, единственная защита webhook'а (подписей нет). |
+
+### Идемпотентность
+
+Тройной слой защиты от двойных списаний / двойных продлений:
+
+1. `Idempotence-Key: <uuid>` в POST /payments — на стороне ЮKassa. UUID v4 на каждую попытку, хранится в `recurring_attempts.idempotence_key`. Сеть упала после нашего отправления → retry с тем же ключом не создаст второй платёж.
+2. `recurring_attempts.external_payment_id` UNIQUE (partial индекс) — на стороне нашей БД. Защита от гонки одновременных webhook'ов.
+3. `RebillWebhookProcessor` проверяет `attempt.status !== Pending` — повторный webhook → no-op.
+
+### Webhook endpoint
+
+`POST /api/yookassa/webhook` (см. `YooKassaWebhookController`). Защита — только IP allowlist (ЮKassa не подписывает webhook'и, факт зафиксирован в их документации).
+
+Endpoint всегда возвращает `200 OK`, даже на внутренние ошибки — иначе ЮKassa спамит retry'ями по экспоненте, забивая лог и БД. Реальные ошибки видим в логах через `YooKassa webhook processing failed`.
+
+### Что зарегистрировать в ЛК ЮKassa
+
+После деплоя — **дважды** (для test- и live-магазинов):
+
+1. Личный кабинет ЮKassa → Интеграция → HTTP-уведомления.
+2. URL: `https://${DOMAIN}/api/yookassa/webhook`.
+3. События: `payment.succeeded`, `payment.canceled`. (`payment.waiting_for_capture` опционально — мы не двухстадийные.)
+4. Сохранить.
+
+Без этого webhook'и не будут приходить — recurring'и зависнут в `pending` навсегда (и через 24 часа сюда не успеет придти retry).
+
+### Логирование
+
+С recurring деньги ходят без участия юзера — обязательно полная аудит-трасса. Логируем:
+
+- `RebillScheduler tick` — каждый запуск с now.
+- `Recurring attempt created` / `dispatched to YooKassa` / `failed at API call`.
+- `YooKassa webhook processed` с result-кодом.
+- `Recurring payment succeeded` / `failed` с attempt_id и причиной.
+
+Никогда не логируем `provider_token`, `secret_key`, тело webhook'а целиком (там могут быть metadata пользователя).
+
+## Безопасность
+
+- `provider_token` / `secret_key` — никогда в логи. Логируется только `payment_id`, `external_id`, `amount_minor`, `user_id` (UUID).
+- payload подписан намерением (`user_id`/`amount_minor`), проверяется в pre_checkout. Подмена суммы на стороне клиента отбивается.
+- `provider_token` хранится в env-переменной, путь от env до сервиса — через `YooKassaConfig`, без хардкодов.
+- Webhook endpoint защищён IP allowlist'ом (см. `YooKassaIpAllowlist`). ЮKassa подписей не присылает, IP-фильтр зафиксирован их документацией.
+
 ## Roadmap
 
 - S4 — однократные платежи через Telegram Payments ✅
-- S5 — auto-rebill: webhook от ЮKassa, recurring через external_subscription_id, email-уведомления о продлении
+- S5 — auto-rebill через сохранённый токен + webhook ✅
 - S6 — refund через ЮKassa Refund API + admin stats по refund'ам

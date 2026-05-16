@@ -206,9 +206,24 @@ Callback `subscription:cancel` — двухшаговый flow:
 - Миграция `Version20260516000000` — partial UNIQUE по `payments.external_payment_id` (идемпотентность на уровне БД).
 - 8 smoke-сценариев `s4-*`.
 
+## Что сделано в S5
+
+Auto-rebill — подписка сама продлевается через сохранённый токен карты, без действия пользователя. Подробно — `docs/subscriptions-recurring.md` (UX-стейты, callback-карта, failed-flow) и `docs/payments.md` § Recurring billing (архитектура, идемпотентность, webhook).
+
+Кратко по компонентам:
+
+- `Subscription.savedPaymentMethodId / autoRebillEnabled / rebillFailedAttempts / notification24hBeforeRebillSentAt` — новые поля.
+- `RecurringAttempt` — журнал попыток списания (UUID, idempotenceKey, status, error_*).
+- `YooKassaApiClient` — REST к https://api.yookassa.ru/v3, Basic-auth shopId/secretKey, `Idempotence-Key` header.
+- `YooKassaIpAllowlist` — IP-фильтр для входящего webhook'а.
+- `RebillScheduler` (cron каждые 15 минут) — 4 фазы: notify-24h, initiate, retry, expire.
+- `RebillWebhookProcessor` — обработка `payment.succeeded` / `payment.canceled` с идемпотентностью.
+- `YooKassaWebhookController` — POST `/api/yookassa/webhook`, всегда 200.
+- UI: hard-cancel из S3 убран, заменён на `subscription:disable_rebill` (мягкая отмена через флаг).
+- 9 smoke-сценариев `s5-*`.
+
 ## Что НЕ сделано (этапы дальше)
 
 | Этап | Что добавляется |
 |---|---|
-| S5 | Auto-rebill — продление через `external_subscription_id` ЮKassa, webhook от ЮKassa, email-уведомления |
 | S6 | Реальный refund через ЮKassa Refund API + admin stats по refund'ам |
